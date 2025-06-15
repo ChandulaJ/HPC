@@ -3,8 +3,9 @@
 #include <time.h>
 
 #define MAX_LINE_LENGTH 1024
+char inputFileLocation[200] = "/home/cj/HPC_data/Human_genome_preprocessed.fna";
 
-void search(const char *line, const char *pattern, int lineNumber) {
+void search(const char *line, const char *pattern) {
     int n = strlen(line);
     int m = strlen(pattern);
     int found = 0;
@@ -23,31 +24,27 @@ void search(const char *line, const char *pattern, int lineNumber) {
 }
 
 int main() {
-    FILE *fp;
-    char filename[100], pattern[100];
+    FILE *infile;
+    char pattern[100];
     char line[MAX_LINE_LENGTH];
-    int lineNumber = 0;
 
-    printf("Enter file name: ");
-    scanf("%s", filename);
     printf("Enter pattern to search: ");
     scanf("%s", pattern);
 
-    fp = fopen(filename, "r");
-    if (fp == NULL) {
+    infile = fopen(filename, "r");
+    if (infile == NULL) {
         perror("Error opening file");
         return 1;
     }
 
     clock_t start = clock();
 
-    while (fgets(line, sizeof(line), fp)) {
-        lineNumber++;
-        search(line, pattern, lineNumber);
+    while (fgets(line, sizeof(line), infile)) {
+        search(line, pattern);
     }
 
     clock_t end = clock();
-    fclose(fp);
+    fclose(infile);
 
     double timeTaken = ((double)(end - start)) / CLOCKS_PER_SEC;
     printf("Time taken for search: %.6f seconds\n", timeTaken);
