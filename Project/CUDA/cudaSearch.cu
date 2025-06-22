@@ -4,16 +4,16 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-#define MAX_LINE_LENGTH 1024
-#define BATCH_SIZE 65536  // Optimized for RTX 3050 Laptop (4GB VRAM, ~2048 CUDA cores)
+#define MAX_LINE_LENGTH 105  // Optimized for typical genomic data line lengths and better memory alignment
+#define BATCH_SIZE 65536     // Optimized for RTX 3050 Laptop (4GB VRAM, ~2048 CUDA cores)
 #define MAX_META_LENGTH 32
 #define READ_BUFFER_SIZE (16 * 1024 * 1024)  // 16MB read buffer for better I/O performance
 
-#define THREADS_PER_BLOCK 512  // RTX 3050 supports up to 1024 threads per block (Ampere arch)
-#define SHARED_MEM_SIZE 256  // Size of shared memory for pattern (most DNA patterns are short)
-#define NUM_STREAMS 4      // More streams for better overlapping on RTX 3050
+#define THREADS_PER_BLOCK 512 // RTX 3050 supports up to 1024 threads per block (Ampere arch)
+#define SHARED_MEM_SIZE 256   // Size of shared memory for pattern (naive algorithm)
+#define NUM_STREAMS 4         // Multiple streams for better overlapping on RTX 3050
 
-// Optimized parallelized version of the search function
+// Highly optimized naive string matching implementation for CUDA
 __global__ void searchKernel(
     const char *d_lines,
     const char *d_pattern,
@@ -23,82 +23,42 @@ __global__ void searchKernel(
     int *d_matchCount
 ) {
     __shared__ char sharedPattern[SHARED_MEM_SIZE];  // Shared memory for pattern
-    __shared__ unsigned char shift[256];  // Quick shift table for optimized search
     
-    // Initialize shift table cooperatively
-    for (int i = threadIdx.x; i < 256; i += blockDim.x) {
-        shift[i] = pattSize;
-    }
-    
-    // Load pattern into shared memory and build shift table
+    // Cooperative loading of pattern into shared memory (coalesced)
+    // Each warp loads a section of the pattern - reduces bank conflicts
     if (threadIdx.x < pattSize) {
-        int idx = pattSize - 1 - threadIdx.x;
-        if (idx >= 0) {
-            sharedPattern[idx] = d_pattern[idx];
-            // For each character in the pattern, record how far we can shift
-            if (idx < pattSize - 1) { // Don't set for the last character
-                shift[(unsigned char)d_pattern[idx]] = pattSize - 1 - idx;
-            }
-        }
+        sharedPattern[threadIdx.x] = d_pattern[threadIdx.x];
     }
     
-    __syncthreads(); // Wait for all threads to finish loading pattern and shift table
+    __syncthreads(); // Wait for all threads to finish loading pattern
     
     // Each thread processes one line
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= lineCount) return;
     
     const char *line = d_lines + idx * MAX_LINE_LENGTH;
-    int lineLen = 0;
+
     
-    // Find length of line - using faster loop unrolling optimized for RTX 3050 L1 cache
-    #pragma unroll 8  // More aggressive unrolling for Ampere architecture
-    while (lineLen < MAX_LINE_LENGTH && line[lineLen] != '\0' && line[lineLen] != '\n') {
-        lineLen++;
-    }
-    
-    // Hybrid approach: Use optimized skip for long patterns, linear for short
-    if (pattSize > 3) {
-        // Optimized skip-based search (based on Boyer-Moore-Horspool)
-        int i = 0;
-        while (i <= lineLen - pattSize) {
-            int j = pattSize - 1;
-            
-            // Check pattern from end to start (right to left)
-            while (j >= 0 && sharedPattern[j] == line[i + j]) {
-                j--;
-            }
-            
-            if (j < 0) {
-                // Found a match
-                int pos = atomicAdd(d_matchCount, 1);
-                if (pos < BATCH_SIZE) { // Prevent array overruns
-                    d_matchIndices[pos] = idx;
-                }
+    // Simple naive string matching algorithm
+    // For each possible starting position in the line
+    for (int i = 0; i <= MAX_LINE_LENGTH - pattSize; i++) {
+        // Check if pattern matches at this position
+        bool matched = true;
+        
+        for (int j = 0; j < pattSize; j++) {
+            if (line[i + j] != sharedPattern[j]) {
+                matched = false;
                 break;
             }
-            
-            // Skip based on the character that caused the mismatch
-            unsigned char badChar = line[i + pattSize - 1];
-            i += shift[badChar];
         }
-    } else {
-        // Linear search for very short patterns (more efficient for 1-3 chars)
-        for (int i = 0; i <= lineLen - pattSize; i++) {
-            int j;
-            for (j = 0; j < pattSize; j++) {
-                if (line[i + j] != sharedPattern[j])
-                    break;
+        
+        if (matched) {
+            // Found a match
+            int pos = atomicAdd(d_matchCount, 1);
+            if (pos < BATCH_SIZE) { // Prevent array overruns
+                d_matchIndices[pos] = idx;
             }
-            
-            if (j == pattSize) {
-                // Found a match
-                int pos = atomicAdd(d_matchCount, 1);
-                if (pos < BATCH_SIZE) { // Prevent array overruns
-                    d_matchIndices[pos] = idx;
-                }
-                break;
-            }
+            break; // Only record the first match in each line
         }
     }
 }
@@ -107,14 +67,13 @@ int main() {
     char inputFileLocation[] = "/home/cj/HPC_data/Human_genome_preprocessed.fna";
     FILE *infile = NULL;
     char pattern[MAX_LINE_LENGTH];
-    char *buffer = NULL;        // Will allocate a larger read buffer
+    char *buffer = NULL;        // Large read buffer for file I/O
     char *lineBuffer = NULL;    // Temporary buffer for line processing
     
     // Declare all variables at the beginning
     int totalLineCount = 0;        // Total lines processed
     int totalMatchCount = 0;       // Total matches found across all batches
     int currentBatch = 0;          // Current batch number
-    char **lines = NULL;           // Array of line pointers for current batch
     char (*chromoHost)[MAX_META_LENGTH] = NULL;  // Metadata for current batch
     char (*lineNumHost)[MAX_META_LENGTH] = NULL; // Line numbers for current batch
     char *h_batchLines = NULL;     // Host memory for batch (pinned for faster transfers)
@@ -129,72 +88,73 @@ int main() {
     cudaError_t cudaStatus = cudaSuccess;
     int numBlocks = 0;
     float totalMilliseconds = 0;
-    float stepMilliseconds = 0;    // Timer for individual steps
-    cudaEvent_t start, stop, stepStart, stepStop;
+    cudaEvent_t start, stop;
     
-    // Optimize CUDA device settings
-    cudaDeviceSetCacheConfig(cudaFuncCachePreferShared); // Prefer shared memory
-    cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleYield); // Enable pinned memory and yield to CPU
+    // Optimize CUDA device settings for RTX 3050 Laptop GPU
+    // These settings prioritize shared memory and enable asynchronous operations
+    cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
+    cudaSetDeviceFlags(cudaDeviceMapHost | cudaDeviceScheduleYield | cudaDeviceLmemResizeToMax);
     
     // Create CUDA streams for overlapping operations
     for (int i = 0; i < NUM_STREAMS; i++) {
-        cudaStreamCreate(&streams[i]);
+        if (cudaStreamCreate(&streams[i]) != cudaSuccess) {
+            fprintf(stderr, "Failed to create CUDA stream %d\n", i);
+            goto Error;
+        }
     }
     
-    // Set CUDA device to asynchronous mode to further overlap operations
-    cudaSetDeviceFlags(cudaDeviceScheduleYield | cudaDeviceMapHost | cudaDeviceLmemResizeToMax);
-    
     // Create CUDA events for timing
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventCreate(&stepStart);
-    cudaEventCreate(&stepStop);
+    if (cudaEventCreate(&start) != cudaSuccess || cudaEventCreate(&stop) != cudaSuccess) {
+        fprintf(stderr, "Failed to create CUDA events\n");
+        goto Error;
+    }
     
-    // Set device for max performance on RTX 3050 Laptop GPU
+    // Get and display GPU information
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    printf("Using GPU: %s\n", prop.name);
-    printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
-    printf("Multiprocessors: %d\n", prop.multiProcessorCount);
-    printf("Shared Memory per Block: %lu KB\n", prop.sharedMemPerBlock / 1024);
+    if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess) {
+        printf("Using GPU: %s\n", prop.name);
+        printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
+        printf("Multiprocessors: %d\n", prop.multiProcessorCount);
+        printf("Shared Memory per Block: %lu KB\n", prop.sharedMemPerBlock / 1024);
+        
+        // Optimize kernel configuration based on GPU properties
+        cudaFuncSetAttribute(searchKernel, cudaFuncAttributePreferredSharedMemoryCarveout, 
+                           cudaSharedmemCarveoutMaxShared);
+    } else {
+        fprintf(stderr, "Warning: Could not get device properties\n");
+    }
     
-    // Optimize L1/shared memory config for RTX 3050 (Ampere architecture)
-    cudaFuncSetAttribute(searchKernel, cudaFuncAttributePreferredSharedMemoryCarveout, 
-                       cudaSharedmemCarveoutMaxShared);
-    
+    // Get search pattern from user
     printf("Enter pattern to search: ");
-    scanf("%s", pattern);
+    if (scanf("%s", pattern) != 1) {
+        fprintf(stderr, "Error reading pattern\n");
+        goto Error;
+    }
     
     printf("Searching for pattern: %s\n", pattern);
+    printf("Pattern size: %d\n", (int)strlen(pattern));
     printf("============================================================================\n");
     
-    // Allocate device memory for pattern once
+    // Allocate and initialize device memory
     cudaStatus = cudaMalloc(&d_pattern, strlen(pattern) + 1);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc for d_pattern failed: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
-
-    printf("pattern size %d\n", (int)strlen(pattern));
     
-    // Copy pattern to device
     cudaStatus = cudaMemcpy(d_pattern, pattern, strlen(pattern) + 1, cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy to d_pattern failed: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
     
-    // Allocate device memory for match count
     cudaStatus = cudaMalloc(&d_matchCount, sizeof(int));
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc for d_matchCount failed: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
     
-    // Allocate host memory for the batch - using pinned memory for all critical structures
-    lines = (char **)malloc(BATCH_SIZE * sizeof(char *));
-    
-    // Use pinned memory for metadata to improve transfer performance on RTX 3050
+    // Allocate pinned memory for metadata (improves transfer performance)
     cudaStatus = cudaMallocHost((void**)&chromoHost, BATCH_SIZE * sizeof(char[MAX_META_LENGTH]));
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMallocHost for chromoHost failed: %s\n", cudaGetErrorString(cudaStatus));
@@ -213,14 +173,14 @@ int main() {
         goto Error;
     }
     
-    // Use pinned memory for data that will be transferred to GPU
+    // Use pinned memory for batch lines (critical for fast transfers to GPU)
     cudaStatus = cudaMallocHost(&h_batchLines, BATCH_SIZE * MAX_LINE_LENGTH);
-    
-    if (!lines || !chromoHost || !lineNumHost || !h_batchLines || !h_matchOffsets) {
-        fprintf(stderr, "Failed to allocate memory for batch arrays\n");
+    if (cudaStatus != cudaSuccess) {
+        fprintf(stderr, "cudaMallocHost for h_batchLines failed: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
-    // Allocate device memory for BATCH_SIZE lines and match indices
+    
+    // Allocate device memory for lines and match indices
     cudaStatus = cudaMalloc(&d_lines, BATCH_SIZE * MAX_LINE_LENGTH);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc for d_lines failed: %s\n", cudaGetErrorString(cudaStatus));
@@ -233,7 +193,7 @@ int main() {
         goto Error;
     }
     
-    // Allocate read buffers
+    // Allocate read buffers for file I/O
     buffer = (char*)malloc(READ_BUFFER_SIZE);
     lineBuffer = (char*)malloc(MAX_LINE_LENGTH);
     if (!buffer || !lineBuffer) {
@@ -256,18 +216,11 @@ int main() {
     // Start global timer
     cudaEventRecord(start, 0);
     
-    // printf("\nMeasuring performance of different steps:\n");
     printf("============================================================================\n");
     
     // Process file in batches
     while (!feof(infile)) {
         int batchLineCount = 0;
-        
-        // Initialize pointers to NULL for this batch
-        memset(lines, 0, BATCH_SIZE * sizeof(char *));
-        
-        // Start timing file I/O
-        cudaEventRecord(stepStart, 0);
         
         // Read a batch of lines with optimized I/O
         while (batchLineCount < BATCH_SIZE && fgets(lineBuffer, MAX_LINE_LENGTH, infile)) {
@@ -302,29 +255,12 @@ int main() {
             break;
         }
         
-        // Stop timing file I/O
-        // cudaEventRecord(stepStop, 0);
-        // cudaEventSynchronize(stepStop);
-        // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-        // printf("Batch %d: File I/O took %.3f ms\n", currentBatch, stepMilliseconds);
-        
-        // Start timing memory verification
-        cudaEventRecord(stepStart, 0);
-        
         // Just ensure all buffers have proper null termination
         for (int i = 0; i < batchLineCount; i++) {
             h_batchLines[i * MAX_LINE_LENGTH + MAX_LINE_LENGTH - 1] = '\0'; // Ensure null termination
         }
         
-        // Stop timing memory verification
-        // cudaEventRecord(stepStop, 0);
-        // cudaEventSynchronize(stepStop);
-        // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-        // printf("Batch %d: Memory verification took %.3f ms\n", currentBatch, stepMilliseconds);
-        
-        // Start timing host to device transfer
-        cudaEventRecord(stepStart, 0);
-         // Use stream for this batch cycle
+        // Use stream for this batch cycle
         cudaStream_t currentStream = streams[currentBatch % NUM_STREAMS];
         
         // Copy batch data to device using stream
@@ -335,11 +271,7 @@ int main() {
             goto Error;
         }
         
-        // // Stop timing host to device transfer
-        // cudaEventRecord(stepStop, currentStream);
-        // cudaEventSynchronize(stepStop);
-        // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-        // printf("Batch %d: Host to device transfer took %.3f ms\n", currentBatch, stepMilliseconds);
+
 
         // Reset match count for this batch
         cudaStatus = cudaMemsetAsync(d_matchCount, 0, sizeof(int), currentStream);
@@ -348,16 +280,13 @@ int main() {
             goto Error;
         }
         
-        // Start timing kernel execution
-        cudaEventRecord(stepStart, 0);
-        
         // Launch kernel with settings optimized for RTX 3050 Laptop GPU
         // Calculate optimal block count based on GPU's multiprocessor count
         numBlocks = (batchLineCount + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
         // Ensure we have enough blocks to keep all SMs busy (RTX 3050 has ~16 SMs)
         numBlocks = min(numBlocks, (batchLineCount + 31) / 32);
         
-        int sharedMemSize = SHARED_MEM_SIZE + 256 * sizeof(unsigned char); // Pattern + shift table
+        int sharedMemSize = SHARED_MEM_SIZE; // Only need space for the pattern
         searchKernel<<<numBlocks, THREADS_PER_BLOCK, sharedMemSize, currentStream>>>(
             d_lines, d_pattern, (int)strlen(pattern), 
             batchLineCount, d_matchIndices, d_matchCount);
@@ -375,14 +304,7 @@ int main() {
             goto Error;
         }
         
-        // // Stop timing kernel execution
-        // cudaEventRecord(stepStop, 0);
-        // cudaEventSynchronize(stepStop);
-        // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-        // printf("Batch %d: Kernel execution took %.3f ms\n", currentBatch, stepMilliseconds);
-        
-        // Start timing device to host transfer
-        cudaEventRecord(stepStart, 0);
+
         
         // Copy match count result back from device asynchronously
         cudaStatus = cudaMemcpyAsync(&h_matchCount, d_matchCount, sizeof(int), 
@@ -395,16 +317,9 @@ int main() {
         // Need to synchronize on the stream before using h_matchCount
         cudaStreamSynchronize(currentStream);
         
-        // Stop timing device to host transfer
-        // cudaEventRecord(stepStop, 0);
-        // cudaEventSynchronize(stepStop);
-        // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-        // printf("Batch %d: Device to host transfer took %.3f ms\n", currentBatch, stepMilliseconds);
+
         
         if (h_matchCount > 0) {
-            // Start timing result processing
-            cudaEventRecord(stepStart, 0);
-            
             // Allocate memory for match indices
             h_matchIndices = (int *)malloc(h_matchCount * sizeof(int));
             if (!h_matchIndices) {
@@ -425,12 +340,6 @@ int main() {
             // Wait for transfer to complete
             cudaStreamSynchronize(currentStream);
             
-            // // Stop timing result processing
-            // cudaEventRecord(stepStop, 0);
-            // cudaEventSynchronize(stepStop);
-            // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-            // printf("Batch %d: Result processing took %.3f ms\n", currentBatch, stepMilliseconds);
-            
             // Print matches from this batch
             for (int i = 0; i < h_matchCount; i++) {
                 int idx = h_matchIndices[i];
@@ -448,29 +357,10 @@ int main() {
             totalMatchCount += h_matchCount;
         }
         
-        // Start timing cleanup
-        cudaEventRecord(stepStart, 0);
-        
-        // Free line buffers for this batch
-        for (int i = 0; i < batchLineCount; i++) {
-            if (lines[i]) {
-                free(lines[i]);
-                lines[i] = NULL;
-            }
-        }     
-        
         // Update total line count
         totalLineCount += batchLineCount;
         currentBatch++;
-        
-        // // Stop timing cleanup
-        // cudaEventRecord(stepStop, 0);
-        // cudaEventSynchronize(stepStop);
-        // cudaEventElapsedTime(&stepMilliseconds, stepStart, stepStop);
-        // printf("Batch %d: Cleanup took %.3f ms\n\n", currentBatch-1, stepMilliseconds);
-        
-        // Print progress
-        printf("Processed %d lines so far...\r", totalLineCount);
+    
         fflush(stdout);
     }
     
@@ -506,22 +396,10 @@ Error:
     if (buffer) free(buffer);
     if (lineBuffer) free(lineBuffer);
     
-    // Free line buffers
-    if (lines) {
-        for (int i = 0; i < BATCH_SIZE; i++) {
-            if (lines[i]) free(lines[i]);
-        }
-        free(lines);
-    }
-    
-    // chromoHost and lineNumHost are freed with cudaFreeHost above
-    
     if (infile) fclose(infile);
     
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-    cudaEventDestroy(stepStart);
-    cudaEventDestroy(stepStop);
     
     // Clean up streams
     for (int i = 0; i < NUM_STREAMS; i++) {
