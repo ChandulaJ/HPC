@@ -3,8 +3,8 @@
 #include <time.h>
 #include <stdlib.h>
 
-#define MAX_LINE_LENGTH 1024
-#define MAX_LINES 100000000
+#define MAX_LINE_LENGTH 200
+#define MAX_LINES 50000000
 char inputFileLocation[200] = "/home/cj/HPC_data/Human_genome_preprocessed.fna";
 
 int search(const char *line, const char *pattern)

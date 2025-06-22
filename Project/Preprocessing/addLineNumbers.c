@@ -32,7 +32,7 @@ int main() {
             line_num = 0;  // Reset line count
         } else if (strlen(line) > 0) {
             line_num++;
-            // Format line number as 4-digit
+            // Format line number as 10-digit
             fprintf(outfile, "%s_%010d|%s\n", chromosome, line_num, line);
         }
     }
