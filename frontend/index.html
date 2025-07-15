@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HPC Genome Search Interface</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            padding: 30px;
+        }
+
+        .execution-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        .execution-card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e1e8ed;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .execution-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.15);
+        }
+
+        .card-title {
+            font-size: 1.4em;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #2c3e50;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+        }
+
+        .preprocessing { background-color: #3498db; }
+        .serial { background-color: #e74c3c; }
+        .openmp { background-color: #f39c12; }
+        .cuda { background-color: #27ae60; }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #555;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e1e8ed;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s ease;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-preprocessing {
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: white;
+        }
+
+        .btn-serial {
+            background: linear-gradient(135deg, #e74c3c, #c0392b);
+            color: white;
+        }
+
+        .btn-openmp {
+            background: linear-gradient(135deg, #f39c12, #e67e22);
+            color: white;
+        }
+
+        .btn-cuda {
+            background: linear-gradient(135deg, #27ae60, #229954);
+            color: white;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .output-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 25px;
+            margin-top: 30px;
+        }
+
+        .output-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .output-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .clear-btn {
+            padding: 8px 16px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s ease;
+        }
+
+        .clear-btn:hover {
+            background: #c0392b;
+        }
+
+        .output-content {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-ready { background-color: #27ae60; }
+        .status-running { background-color: #f39c12; }
+        .status-error { background-color: #e74c3c; }
+
+        @media (max-width: 768px) {
+            .execution-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .main-content {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧬 HPC Genome Search Interface</h1>
+            <p>High-Performance Computing Genome Pattern Search - Serial, OpenMP & CUDA Implementations</p>
+        </div>
+
+        <div class="main-content">
+            <div class="execution-grid">
+                <!-- Preprocessing Card -->
+                <div class="execution-card">
+                    <div class="card-title">
+                        <div class="card-icon preprocessing"></div>
+                        <span class="status-indicator status-ready" id="preprocessing-status"></span>
+                        Data Preprocessing
+                    </div>
+                    <p style="margin-bottom: 20px; color: #666;">Prepare genome data with chromosome and line number formatting</p>
+                    <button class="btn btn-preprocessing" onclick="runPreprocessing()">
+                        Run Preprocessing
+                    </button>
+                </div>
+
+                <!-- Serial Search Card -->
+                <div class="execution-card">
+                    <div class="card-title">
+                        <div class="card-icon serial"></div>
+                        <span class="status-indicator status-ready" id="serial-status"></span>
+                        Serial Search
+                    </div>
+                    <div class="input-group">
+                        <label for="serial-pattern">Search Pattern:</label>
+                        <input type="text" id="serial-pattern" placeholder="Enter DNA pattern (e.g., ATCG)" maxlength="50">
+                    </div>
+                    <button class="btn btn-serial" onclick="runSerial()">
+                        Run Serial Search
+                    </button>
+                </div>
+
+                <!-- OpenMP Search Card -->
+                <div class="execution-card">
+                    <div class="card-title">
+                        <div class="card-icon openmp"></div>
+                        <span class="status-indicator status-ready" id="openmp-status"></span>
+                        OpenMP Parallel Search
+                    </div>
+                    <div class="input-group">
+                        <label for="openmp-pattern">Search Pattern:</label>
+                        <input type="text" id="openmp-pattern" placeholder="Enter DNA pattern (e.g., ATCG)" maxlength="50">
+                    </div>
+                    <div class="input-group">
+                        <label for="thread-count">Number of Threads:</label>
+                        <input type="number" id="thread-count" min="1" max="32" value="4" placeholder="Number of threads">
+                    </div>
+                    <button class="btn btn-openmp" onclick="runOpenMP()">
+                        Run OpenMP Search
+                    </button>
+                </div>
+
+                <!-- CUDA Search Card -->
+                <div class="execution-card">
+                    <div class="card-title">
+                        <div class="card-icon cuda"></div>
+                        <span class="status-indicator status-ready" id="cuda-status"></span>
+                        CUDA GPU Search
+                    </div>
+                    <div class="input-group">
+                        <label for="cuda-pattern">Search Pattern:</label>
+                        <input type="text" id="cuda-pattern" placeholder="Enter DNA pattern (e.g., ATCG)" maxlength="50">
+                    </div>
+                    <button class="btn btn-cuda" onclick="runCUDA()">
+                        Run CUDA Search
+                    </button>
+                </div>
+            </div>
+
+            <!-- Output Section -->
+            <div class="output-section">
+                <div class="output-header">
+                    <div class="output-title">📊 Execution Output</div>
+                    <button class="clear-btn" onclick="clearOutput()">Clear Output</button>
+                </div>
+                <div class="loading" id="loading">
+                    <div class="spinner"></div>
+                    <div>Executing... Please wait</div>
+                </div>
+                <div class="output-content" id="output">
+Welcome to HPC Genome Search Interface!
+
+Ready to execute preprocessing, serial search, OpenMP parallel search, or CUDA GPU search.
+Select an operation above to get started.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000/api';
+
+        // Update status indicator
+        function updateStatus(element, status) {
+            const indicator = document.getElementById(element + '-status');
+            indicator.className = 'status-indicator status-' + status;
+        }
+
+        // Show loading state
+        function showLoading(show = true) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        // Add output to the display
+        function addOutput(text) {
+            const output = document.getElementById('output');
+            const timestamp = new Date().toLocaleTimeString();
+            output.textContent += `[${timestamp}] ${text}\n`;
+            output.scrollTop = output.scrollHeight;
+        }
+
+        // Clear output
+        function clearOutput() {
+            document.getElementById('output').textContent = 'Output cleared.\n';
+        }
+
+        // Generic function to run commands
+        async function runCommand(endpoint, data = {}) {
+            try {
+                showLoading(true);
+                
+                const response = await fetch(`${API_BASE}/${endpoint}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+                
+                if (response.ok) {
+                    addOutput(`✅ ${result.message || 'Command completed successfully'}`);
+                    if (result.output) {
+                        addOutput(result.output);
+                    }
+                    if (result.executionTime) {
+                        addOutput(`⏱️ Execution time: ${result.executionTime} seconds`);
+                    }
+                    if (result.totalMatches !== undefined) {
+                        addOutput(`🎯 Total matches found: ${result.totalMatches}`);
+                    }
+                    addOutput('─'.repeat(80));
+                } else {
+                    addOutput(`❌ Error: ${result.error || 'Unknown error occurred'}`);
+                    if (result.details) {
+                        addOutput(`Details: ${result.details}`);
+                    }
+                }
+            } catch (error) {
+                addOutput(`❌ Network Error: ${error.message}`);
+                console.error('Error:', error);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // Run preprocessing
+        async function runPreprocessing() {
+            updateStatus('preprocessing', 'running');
+            addOutput('🔄 Starting data preprocessing...');
+            
+            await runCommand('preprocessing');
+            
+            updateStatus('preprocessing', 'ready');
+        }
+
+        // Run serial search
+        async function runSerial() {
+            const pattern = document.getElementById('serial-pattern').value.trim();
+            
+            if (!pattern) {
+                addOutput('❌ Please enter a search pattern for serial search');
+                return;
+            }
+
+            updateStatus('serial', 'running');
+            addOutput(`🔄 Starting serial search for pattern: "${pattern}"`);
+            
+            await runCommand('serial', { pattern });
+            
+            updateStatus('serial', 'ready');
+        }
+
+        // Run OpenMP search
+        async function runOpenMP() {
+            const pattern = document.getElementById('openmp-pattern').value.trim();
+            const threads = parseInt(document.getElementById('thread-count').value);
+            
+            if (!pattern) {
+                addOutput('❌ Please enter a search pattern for OpenMP search');
+                return;
+            }
+
+            if (!threads || threads < 1) {
+                addOutput('❌ Please enter a valid number of threads (minimum 1)');
+                return;
+            }
+
+            updateStatus('openmp', 'running');
+            addOutput(`🔄 Starting OpenMP parallel search for pattern: "${pattern}" with ${threads} threads`);
+            
+            await runCommand('openmp', { pattern, threads });
+            
+            updateStatus('openmp', 'ready');
+        }
+
+        // Run CUDA search
+        async function runCUDA() {
+            const pattern = document.getElementById('cuda-pattern').value.trim();
+            
+            if (!pattern) {
+                addOutput('❌ Please enter a search pattern for CUDA search');
+                return;
+            }
+
+            updateStatus('cuda', 'running');
+            addOutput(`🔄 Starting CUDA GPU search for pattern: "${pattern}"`);
+            
+            await runCommand('cuda', { pattern });
+            
+            updateStatus('cuda', 'ready');
+        }
+
+        // Initialize the interface
+        document.addEventListener('DOMContentLoaded', function() {
+            addOutput('🚀 HPC Genome Search Interface initialized successfully!');
+            addOutput('📝 Instructions:');
+            addOutput('1. Run preprocessing first to prepare the genome data');
+            addOutput('2. Enter DNA patterns to search (e.g., ATCG, GCTA, etc.)');
+            addOutput('3. Choose between Serial, OpenMP, or CUDA implementations');
+            addOutput('4. View results and performance metrics below');
+            addOutput('─'.repeat(80));
+        });
+    </script>
+</body>
+</html>
