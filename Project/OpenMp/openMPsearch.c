@@ -57,9 +57,14 @@ int main()
     int lineCount = 0;
     char buffer[MAX_LINE_LENGTH];
     int totalFound = 0;
+    int numThreads;
+    int maxThreads = omp_get_max_threads();
 
     printf("Enter pattern to search: ");
     scanf("%s", pattern);
+    
+    printf("Enter number of threads to use: (Max %d threads available): ", maxThreads);
+    scanf("%d", &numThreads);
 
     infile = fopen(inputFileLocation, "r");
     if (infile == NULL)
@@ -82,7 +87,11 @@ int main()
     printf("File loaded to memory successfully\n");
     printf("----------------------------------------------------------------\n");
 
+    // Set the number of threads to use
+    omp_set_num_threads(numThreads);
+    
     printf("Searching for pattern: %s\n", pattern);
+    printf("Number of threads being used: %d\n", omp_get_max_threads());
     printf("============================================================================\n");
 
     double start = omp_get_wtime();
