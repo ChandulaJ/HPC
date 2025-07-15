@@ -98,7 +98,7 @@ int main()
     printf("============================================================================\n");
 
     printf("Total matches found: %d\n", totalFound);
-    printf("Time taken for parallel search: %.6f seconds\n", end - start);
+    printf("Time taken for openmp parallel search: %.6f seconds\n", end - start);
 
     // Cleanup
     for (int i = 0; i < lineCount; i++)
