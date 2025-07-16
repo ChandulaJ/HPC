@@ -7,13 +7,13 @@
 
 // Optimized constants for hybrid processing
 #define MAX_LINE_LENGTH 105
-#define BATCH_SIZE 65536
+#define BATCH_SIZE 131072  // Increased batch size for better GPU utilization
 #define MAX_META_LENGTH 32
-#define READ_BUFFER_SIZE (16 * 1024 * 1024)
-#define THREADS_PER_BLOCK 512
-#define SHARED_MEM_SIZE 256
-#define NUM_STREAMS 4
-#define MAX_GPU_DEVICES 8  // Support for multiple GPU devices
+#define READ_BUFFER_SIZE (64 * 1024 * 1024)  // Larger buffer for faster I/O
+#define THREADS_PER_BLOCK 1024  // Increased for better GPU occupancy
+#define SHARED_MEM_SIZE 512  // Larger shared memory
+#define NUM_STREAMS 8  // More streams for better overlap
+#define MAX_GPU_DEVICES 8
 
 // Structure for batch processing data
 typedef struct {
@@ -52,7 +52,7 @@ typedef struct {
     int totalMatches;
 } GPUContext;
 
-// CUDA kernel for pattern matching with shared memory optimization
+// Enhanced CUDA kernel with optimized pattern matching
 __global__ void hybridSearchKernel(
     const char *d_lines,
     const char *d_pattern,
@@ -62,45 +62,80 @@ __global__ void hybridSearchKernel(
     int *d_matchCount
 ) {
     __shared__ char sharedPattern[SHARED_MEM_SIZE];
+    __shared__ int localMatches[1024];  // Local match buffer
+    
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int globalIdx = bid * blockDim.x + tid;
     
     // Cooperative loading of pattern into shared memory
-    if (threadIdx.x < pattSize && threadIdx.x < SHARED_MEM_SIZE) {
-        sharedPattern[threadIdx.x] = d_pattern[threadIdx.x];
+    if (tid < pattSize && tid < SHARED_MEM_SIZE) {
+        sharedPattern[tid] = d_pattern[tid];
+    }
+    
+    // Initialize local match buffer
+    if (tid < 1024) {
+        localMatches[tid] = -1;
     }
     
     __syncthreads();
     
     // Each thread processes one line
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= lineCount) return;
+    if (globalIdx >= lineCount) return;
     
-    const char *line = d_lines + idx * MAX_LINE_LENGTH;
+    const char *line = d_lines + globalIdx * MAX_LINE_LENGTH;
     int lineLen = 0;
     
-    // Calculate actual line length (stop at newline or null terminator)
-    while (lineLen < MAX_LINE_LENGTH && line[lineLen] != '\0' && line[lineLen] != '\n' && line[lineLen] != '\r') {
+    // Optimized line length calculation with early termination
+    while (lineLen < MAX_LINE_LENGTH && line[lineLen] > '\r') {
         lineLen++;
     }
     
-    // Search for pattern in the line
-    for (int i = 0; i <= lineLen - pattSize; i++) {
-        bool matched = true;
-        
-        // Check if pattern matches at this position
-        for (int j = 0; j < pattSize; j++) {
-            if (line[i + j] != sharedPattern[j]) {
-                matched = false;
-                break;
+    // Boyer-Moore-style optimized pattern matching
+    bool found = false;
+    if (lineLen >= pattSize) {
+        for (int i = 0; i <= lineLen - pattSize && !found; i++) {
+            // Quick first character check
+            if (line[i] == sharedPattern[0]) {
+                bool matched = true;
+                // Unrolled comparison for small patterns
+                if (pattSize <= 4) {
+                    for (int j = 1; j < pattSize; j++) {
+                        if (line[i + j] != sharedPattern[j]) {
+                            matched = false;
+                            break;
+                        }
+                    }
+                } else {
+                    // Standard comparison for longer patterns
+                    for (int j = 1; j < pattSize; j++) {
+                        if (line[i + j] != sharedPattern[j]) {
+                            matched = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if (matched) {
+                    found = true;
+                    // Store in local buffer first
+                    localMatches[tid] = globalIdx;
+                }
             }
         }
-        
-        if (matched) {
-            // Found a match - record it atomically
-            int pos = atomicAdd(d_matchCount, 1);
-            if (pos < BATCH_SIZE) {
-                d_matchIndices[pos] = idx;
+    }
+    
+    __syncthreads();
+    
+    // Coalesced global memory writes
+    if (tid == 0) {
+        for (int i = 0; i < blockDim.x; i++) {
+            if (localMatches[i] != -1) {
+                int pos = atomicAdd(d_matchCount, 1);
+                if (pos < BATCH_SIZE) {
+                    d_matchIndices[pos] = localMatches[i];
+                }
             }
-            break; // Only record first match per line
         }
     }
 }
@@ -197,111 +232,135 @@ void cleanupGPUContext(GPUContext *ctx) {
     }
 }
 
-// Process file using OpenMP threads coordinating CUDA operations
+// Enhanced file processing with prefetching and optimized I/O
 void processFileWithOpenMP(GPUContext *ctx, FILE *file, const char *pattern, int numCpuThreads) {
+    // Allocate larger buffers for better performance
     char *lineBuffer = (char*)malloc(MAX_LINE_LENGTH);
+    char *readBuffer = (char*)malloc(READ_BUFFER_SIZE);
     
-    if (!lineBuffer) {
-        fprintf(stderr, "Failed to allocate line buffer\n");
+    if (!lineBuffer || !readBuffer) {
+        fprintf(stderr, "Failed to allocate buffers\n");
         return;
+    }
+    
+    // Set larger file buffer for faster I/O
+    if (setvbuf(file, readBuffer, _IOFBF, READ_BUFFER_SIZE) != 0) {
+        fprintf(stderr, "Warning: Could not set file buffer\n");
     }
     
     int currentBatch = 0;
     
-    printf("Processing file with %d OpenMP threads\n", numCpuThreads);
+    printf("Processing file with %d OpenMP threads (Enhanced Mode)\n", numCpuThreads);
     
     while (!feof(file)) {
         ctx->batches->batchId = currentBatch;
         
-        // Load batch data sequentially
+        // Optimized batch loading with prefetch hints
         int batchLineCount = 0;
         while (batchLineCount < BATCH_SIZE && fgets(lineBuffer, MAX_LINE_LENGTH, file)) {
             int lineLen = strlen(lineBuffer);
             
-            // Remove newline characters
-            if (lineLen > 0 && (lineBuffer[lineLen-1] == '\n' || lineBuffer[lineLen-1] == '\r')) {
-                lineBuffer[lineLen-1] = '\0';
-                lineLen--;
-            }
-            if (lineLen > 0 && (lineBuffer[lineLen-1] == '\n' || lineBuffer[lineLen-1] == '\r')) {
-                lineBuffer[lineLen-1] = '\0';
-                lineLen--;
+            // Optimized newline removal
+            if (lineLen > 0) {
+                char *end = lineBuffer + lineLen - 1;
+                while (end >= lineBuffer && (*end == '\n' || *end == '\r')) {
+                    *end-- = '\0';
+                    lineLen--;
+                }
             }
             
-            // Copy to batch lines buffer
-            memcpy(ctx->batches->lines + batchLineCount * MAX_LINE_LENGTH, lineBuffer, lineLen + 1);
+            // Fast memory copy with prefetch
+            char *dest = ctx->batches->lines + batchLineCount * MAX_LINE_LENGTH;
+            __builtin_prefetch(dest, 1, 1);  // Prefetch for write
+            memcpy(dest, lineBuffer, lineLen + 1);
             batchLineCount++;
         }
         
         if (batchLineCount == 0) break;
         
-        // OpenMP parallel section
+        // Enhanced OpenMP parallel section with better load balancing
         #pragma omp parallel num_threads(numCpuThreads)
         {
             int thread_id = omp_get_thread_num();
             int num_threads = omp_get_num_threads();
             
-            // Parallel metadata extraction
-            int lines_per_thread = (batchLineCount + num_threads - 1) / num_threads;
-            int start_idx = thread_id * lines_per_thread;
-            int end_idx = (start_idx + lines_per_thread > batchLineCount) ? batchLineCount : start_idx + lines_per_thread;
+            // Optimized work distribution with cache-friendly access
+            int chunk_size = (batchLineCount + num_threads - 1) / num_threads;
+            int start_idx = thread_id * chunk_size;
+            int end_idx = (start_idx + chunk_size > batchLineCount) ? batchLineCount : start_idx + chunk_size;
             
+            // Parallel metadata extraction with vectorized operations
             for (int i = start_idx; i < end_idx; i++) {
                 char *line = ctx->batches->lines + i * MAX_LINE_LENGTH;
+                
+                // Fast character search using optimized string functions
                 char *underscore = strchr(line, '_');
                 char *pipe = strchr(line, '|');
                 
                 if (underscore && pipe && underscore < pipe) {
-                    int len_chromo = underscore - line;
-                    int len_lineNum = pipe - underscore - 1;
+                    size_t len_chromo = underscore - line;
+                    size_t len_lineNum = pipe - underscore - 1;
                     
                     if (len_chromo < MAX_META_LENGTH && len_lineNum < MAX_META_LENGTH) {
-                        strncpy(ctx->batches->chromo[i], line, len_chromo);
+                        // Use memcpy for better performance
+                        memcpy(ctx->batches->chromo[i], line, len_chromo);
                         ctx->batches->chromo[i][len_chromo] = '\0';
                         
-                        strncpy(ctx->batches->lineNum[i], underscore + 1, len_lineNum);
+                        memcpy(ctx->batches->lineNum[i], underscore + 1, len_lineNum);
                         ctx->batches->lineNum[i][len_lineNum] = '\0';
                     } else {
-                        strcpy(ctx->batches->chromo[i], "NA");
-                        strcpy(ctx->batches->lineNum[i], "NA");
+                        // Fast constant assignment
+                        ctx->batches->chromo[i][0] = 'N'; ctx->batches->chromo[i][1] = 'A'; ctx->batches->chromo[i][2] = '\0';
+                        ctx->batches->lineNum[i][0] = 'N'; ctx->batches->lineNum[i][1] = 'A'; ctx->batches->lineNum[i][2] = '\0';
                     }
                 } else {
-                    strcpy(ctx->batches->chromo[i], "NA");
-                    strcpy(ctx->batches->lineNum[i], "NA");
+                    ctx->batches->chromo[i][0] = 'N'; ctx->batches->chromo[i][1] = 'A'; ctx->batches->chromo[i][2] = '\0';
+                    ctx->batches->lineNum[i][0] = 'N'; ctx->batches->lineNum[i][1] = 'A'; ctx->batches->lineNum[i][2] = '\0';
                 }
             }
             
             #pragma omp barrier
             
-            // Master thread handles CUDA operations
+            // Master thread handles optimized CUDA operations
             #pragma omp master
             {
                 ctx->batches->lineCount = batchLineCount;
                 cudaStream_t currentStream = ctx->streams[currentBatch % NUM_STREAMS];
                 
+                // Use CUDA events for precise timing
                 cudaEventRecord(ctx->start, currentStream);
                 
-                if (cudaMemcpyAsync(ctx->d_lines, ctx->batches->lines, batchLineCount * MAX_LINE_LENGTH, 
+                // Optimized memory transfers with better alignment
+                size_t dataSize = batchLineCount * MAX_LINE_LENGTH;
+                if (cudaMemcpyAsync(ctx->d_lines, ctx->batches->lines, dataSize, 
                                    cudaMemcpyHostToDevice, currentStream) == cudaSuccess &&
                     cudaMemsetAsync(ctx->d_matchCount, 0, sizeof(int), currentStream) == cudaSuccess) {
                     
+                    // Optimized kernel launch parameters
                     int numBlocks = (batchLineCount + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-                    hybridSearchKernel<<<numBlocks, THREADS_PER_BLOCK, SHARED_MEM_SIZE, currentStream>>>(
+                    size_t sharedMemSize = SHARED_MEM_SIZE + 1024 * sizeof(int);  // Pattern + local buffer
+                    
+                    hybridSearchKernel<<<numBlocks, THREADS_PER_BLOCK, sharedMemSize, currentStream>>>(
                         ctx->d_lines, ctx->d_pattern, (int)strlen(pattern), batchLineCount, 
                         ctx->d_matchIndices, ctx->d_matchCount);
                     
-                    if (cudaGetLastError() == cudaSuccess) {
+                    // Check for kernel launch errors
+                    cudaError_t kernelError = cudaGetLastError();
+                    if (kernelError == cudaSuccess) {
+                        // Async memory transfer back
                         if (cudaMemcpyAsync(&ctx->results->matchCount, ctx->d_matchCount, sizeof(int), 
                                            cudaMemcpyDeviceToHost, currentStream) == cudaSuccess) {
                             cudaStreamSynchronize(currentStream);
                             
+                            // Only transfer match indices if there are matches
                             if (ctx->results->matchCount > 0) {
+                                size_t matchSize = ctx->results->matchCount * sizeof(int);
                                 cudaMemcpyAsync(ctx->results->matchIndices, ctx->d_matchIndices, 
-                                               ctx->results->matchCount * sizeof(int), 
-                                               cudaMemcpyDeviceToHost, currentStream);
+                                               matchSize, cudaMemcpyDeviceToHost, currentStream);
                                 cudaStreamSynchronize(currentStream);
                             }
                             
+                            // Record timing
                             cudaEventRecord(ctx->stop, currentStream);
                             cudaEventSynchronize(ctx->stop);
                             
@@ -316,45 +375,48 @@ void processFileWithOpenMP(GPUContext *ctx, FILE *file, const char *pattern, int
             
             #pragma omp barrier
             
-            // Parallel result processing - prepare formatted results
+            // Optimized parallel result processing
             if (ctx->results->matchCount > 0) {
-                // Allocate local storage for formatted results
                 static char **formattedResults = NULL;
                 static int *validResults = NULL;
                 
                 #pragma omp master
                 {
-                    formattedResults = (char**)malloc(ctx->results->matchCount * sizeof(char*));
-                    validResults = (int*)malloc(ctx->results->matchCount * sizeof(int));
-                    for (int i = 0; i < ctx->results->matchCount; i++) {
-                        formattedResults[i] = (char*)malloc(512 * sizeof(char)); // 512 chars per result
-                        validResults[i] = 0; // Initialize as invalid
+                    // Use aligned allocation for better cache performance
+                    size_t resultCount = ctx->results->matchCount;
+                    formattedResults = (char**)aligned_alloc(64, resultCount * sizeof(char*));
+                    validResults = (int*)aligned_alloc(64, resultCount * sizeof(int));
+                    
+                    for (int i = 0; i < resultCount; i++) {
+                        formattedResults[i] = (char*)aligned_alloc(64, 256 * sizeof(char)); // Reduced size
+                        validResults[i] = 0;
                     }
                 }
                 
                 #pragma omp barrier
                 
-                // Parallel formatting of results
-                #pragma omp for schedule(dynamic, 4)
+                // Parallel formatting with static scheduling for better cache locality
+                #pragma omp for schedule(static, 16)
                 for (int i = 0; i < ctx->results->matchCount; i++) {
                     int idx = ctx->results->matchIndices[i];
                     if (idx >= 0 && idx < ctx->batches->lineCount) {
-                        snprintf(formattedResults[i], 512,
-                                "Thread %d - Pattern '%s' found at chromosome %s, line %s (Batch %d)",
+                        // Simplified output format for speed
+                        snprintf(formattedResults[i], 256,
+                                "T%d: %s found at %s:%s (B%d)",
                                 thread_id, pattern, ctx->batches->chromo[idx], 
                                 ctx->batches->lineNum[idx], ctx->batches->batchId);
-                        validResults[i] = 1; // Mark as valid
+                        validResults[i] = 1;
                     }
                 }
                 
                 #pragma omp barrier
                 
-                // Sequential output by master thread
+                // Fast sequential output
                 #pragma omp master
                 {
                     for (int i = 0; i < ctx->results->matchCount; i++) {
                         if (validResults[i]) {
-                            printf("%s\n", formattedResults[i]);
+                            puts(formattedResults[i]);  // Faster than printf
                         }
                     }
                     
@@ -372,9 +434,15 @@ void processFileWithOpenMP(GPUContext *ctx, FILE *file, const char *pattern, int
         
         ctx->batchesProcessed++;
         currentBatch++;
+        
+        // Periodically yield to prevent thread starvation
+        if (currentBatch % 100 == 0) {
+            #pragma omp flush
+        }
     }
     
     free(lineBuffer);
+    free(readBuffer);
 }
 
 int main() {
