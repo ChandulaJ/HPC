@@ -90,6 +90,7 @@
         .serial { background-color: #e74c3c; }
         .openmp { background-color: #f39c12; }
         .cuda { background-color: #27ae60; }
+        .hybrid { background-color: #9b59b6; }
 
         .input-group {
             margin-bottom: 15px;
@@ -147,6 +148,11 @@
 
         .btn-cuda {
             background: linear-gradient(135deg, #27ae60, #229954);
+            color: white;
+        }
+
+        .btn-hybrid {
+            background: linear-gradient(135deg, #9b59b6, #8e44ad);
             color: white;
         }
 
@@ -334,6 +340,7 @@
         .serial-loading { border-color: #e74c3c; }
         .openmp-loading { border-color: #f39c12; }
         .cuda-loading { border-color: #27ae60; }
+        .hybrid-loading { border-color: #9b59b6; }
 
         .spinner {
             border: 4px solid #f3f3f3;
@@ -381,7 +388,7 @@
     <div class="container">
         <div class="header">
             <h1>🧬 HPC Genome Search Interface</h1>
-            <p>High-Performance Computing Genome Pattern Search - Serial, OpenMP & CUDA Implementations</p>
+            <p>High-Performance Computing Genome Pattern Search - Serial, OpenMP, CUDA & Hybrid Implementations</p>
         </div>
 
         <div class="main-content">
@@ -448,6 +455,27 @@
                     </div>
                     <button class="btn btn-cuda" onclick="runCUDA()">
                         Run CUDA Search
+                    </button>
+                </div>
+
+                <!-- Hybrid Search Card -->
+                <div class="execution-card">
+                    <div class="card-title">
+                        <div class="card-icon hybrid"></div>
+                        <span class="status-indicator status-ready" id="hybrid-status"></span>
+                        Hybrid CUDA+OpenMP Search
+                    </div>
+                    <p style="margin-bottom: 15px; color: #666; font-size: 13px;">🚀 Maximum performance combining GPU and CPU acceleration</p>
+                    <div class="input-group">
+                        <label for="hybrid-pattern">Search Pattern:</label>
+                        <input type="text" id="hybrid-pattern" placeholder="Enter DNA pattern (e.g., ATCG)" maxlength="50">
+                    </div>
+                    <div class="input-group">
+                        <label for="hybrid-thread-count">CPU Threads:</label>
+                        <input type="number" id="hybrid-thread-count" min="1" max="32" value="4" placeholder="Number of CPU threads">
+                    </div>
+                    <button class="btn btn-hybrid" onclick="runHybrid()">
+                        Run Hybrid Search
                     </button>
                 </div>
             </div>
@@ -520,6 +548,21 @@ Ready for OpenMP parallel search...
 Ready for CUDA GPU search...
                         </div>
                     </div>
+
+                    <!-- Hybrid Output -->
+                    <div class="output-window">
+                        <div class="output-window-header">
+                            <span class="output-window-title">⚡🚀 Hybrid CUDA+OpenMP Output</span>
+                            <button class="mini-clear-btn" onclick="clearOutput('hybrid')">Clear</button>
+                        </div>
+                        <div class="loading hybrid-loading" id="hybrid-loading">
+                            <div class="mini-spinner"></div>
+                            <div>Hybrid processing...</div>
+                        </div>
+                        <div class="output-window-content" id="hybrid-output">
+Ready for hybrid CUDA+OpenMP search...
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Performance Comparison Section -->
@@ -542,7 +585,8 @@ Performance metrics will appear here after running searches...
             preprocessing: null,
             serial: null,
             openmp: null,
-            cuda: null
+            cuda: null,
+            hybrid: null
         };
 
         // Update status indicator
@@ -583,6 +627,7 @@ Performance metrics will appear here after running searches...
             clearOutput('serial');
             clearOutput('openmp');
             clearOutput('cuda');
+            clearOutput('hybrid');
             clearPerformance();
         }
 
@@ -751,7 +796,8 @@ Performance metrics will appear here after running searches...
                 'preprocessing': '#3498db',
                 'serial': '#e74c3c',
                 'openmp': '#f39c12',
-                'cuda': '#27ae60'
+                'cuda': '#27ae60',
+                'hybrid': '#9b59b6'
             };
             return colors[component] || '#95a5a6';
         }
@@ -864,6 +910,24 @@ Performance metrics will appear here after running searches...
             await runCommand('cuda', 'cuda', { pattern });
         }
 
+        // Run Hybrid search
+        async function runHybrid() {
+            const pattern = document.getElementById('hybrid-pattern').value.trim();
+            const threads = parseInt(document.getElementById('hybrid-thread-count').value);
+            
+            if (!pattern) {
+                addOutput('hybrid', '❌ Please enter a search pattern for hybrid search');
+                return;
+            }
+
+            if (!threads || threads < 1) {
+                addOutput('hybrid', '❌ Please enter a valid number of threads (minimum 1)');
+                return;
+            }
+
+            await runCommand('hybrid', 'hybrid', { pattern, threads });
+        }
+
         // Initialize the interface
         document.addEventListener('DOMContentLoaded', function() {
             addOutput('preprocessing', '🚀 HPC Genome Search Interface initialized!');
@@ -877,6 +941,9 @@ Performance metrics will appear here after running searches...
             
             addOutput('cuda', '🚀 Ready for CUDA GPU search');
             addOutput('cuda', '📝 Enter search pattern for GPU acceleration');
+            
+            addOutput('hybrid', '🚀 Ready for hybrid CUDA+OpenMP search');
+            addOutput('hybrid', '📝 Maximum performance with GPU+CPU acceleration');
         });
     </script>
 </body>

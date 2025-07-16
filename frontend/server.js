@@ -18,6 +18,7 @@ const PREPROCESSING_PATH = path.join(PROJECT_ROOT, 'Preprocessing');
 const SERIAL_PATH = path.join(PROJECT_ROOT, 'Serial');
 const OPENMP_PATH = path.join(PROJECT_ROOT, 'OpenMp');
 const CUDA_PATH = path.join(PROJECT_ROOT, 'CUDA');
+const HYBRID_PATH = path.join(PROJECT_ROOT, 'Hybrid');
 
 // Utility function to execute commands with timeout and better error handling
 function executeCommand(command, args, options = {}) {
@@ -350,6 +351,67 @@ app.post('/api/cuda', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'CUDA search failed',
+            details: error.error || error.message,
+            output: error.output || ''
+        });
+    }
+});
+
+// Hybrid search endpoint
+app.post('/api/hybrid', async (req, res) => {
+    try {
+        const { pattern, threads } = req.body;
+        
+        if (!pattern) {
+            return res.status(400).json({
+                success: false,
+                error: 'Pattern is required'
+            });
+        }
+
+        if (!threads || threads < 1) {
+            return res.status(400).json({
+                success: false,
+                error: 'Valid thread count is required'
+            });
+        }
+
+        console.log(`Starting hybrid search for pattern: ${pattern} with ${threads} threads`);
+
+        // Check if executable exists, compile if needed
+        const executablePath = path.join(HYBRID_PATH, 'hybridSearch');
+        if (!fs.existsSync(executablePath)) {
+            console.log('Compiling hybrid search program...');
+            await executeCommand('make', [], {
+                cwd: HYBRID_PATH
+            });
+        }
+
+        // Run hybrid search
+        const result = await executeCommand('./hybridSearch', [], {
+            cwd: HYBRID_PATH,
+            input: `${pattern}\n${threads}\n`,
+            timeout: 600000, // 10 minutes
+            env: { ...process.env, OMP_NUM_THREADS: threads.toString() }
+        });
+
+        const parsedResults = parseResults(result.output);
+
+        res.json({
+            success: true,
+            message: `Hybrid search completed successfully with ${threads} threads`,
+            output: result.output,
+            executionTime: parsedResults.executionTime || result.executionTime,
+            totalMatches: parsedResults.totalMatches,
+            matchDetails: parsedResults.details,
+            threads: threads
+        });
+
+    } catch (error) {
+        console.error('Hybrid search error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Hybrid search failed',
             details: error.error || error.message,
             output: error.output || ''
         });
