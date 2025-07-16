@@ -172,7 +172,25 @@ function parseResults(output) {
 // Preprocessing endpoint
 app.post('/api/preprocessing', async (req, res) => {
     try {
-        console.log('Starting preprocessing...');
+        const { inputFilePath, outputFilePath } = req.body;
+        
+        if (!inputFilePath) {
+            return res.status(400).json({
+                success: false,
+                error: 'Input file path is required'
+            });
+        }
+
+        if (!outputFilePath) {
+            return res.status(400).json({
+                success: false,
+                error: 'Output file path is required'
+            });
+        }
+
+        console.log(`Starting preprocessing...`);
+        console.log(`Input file: ${inputFilePath}`);
+        console.log(`Output file: ${outputFilePath}`);
         
         // Check if executable exists, compile if needed
         const executablePath = path.join(PREPROCESSING_PATH, 'addLineNumbers');
@@ -183,9 +201,10 @@ app.post('/api/preprocessing', async (req, res) => {
             });
         }
 
-        // Run preprocessing
+        // Run preprocessing with input and output file paths
         const result = await executeCommand('./addLineNumbers', [], {
             cwd: PREPROCESSING_PATH,
+            input: `${inputFilePath}\n${outputFilePath}\n`,
             timeout: 600000 // 10 minutes for large files
         });
 
@@ -193,7 +212,9 @@ app.post('/api/preprocessing', async (req, res) => {
             success: true,
             message: 'Preprocessing completed successfully',
             output: result.output,
-            executionTime: result.executionTime
+            executionTime: result.executionTime,
+            inputFilePath: inputFilePath,
+            outputFilePath: outputFilePath
         });
 
     } catch (error) {

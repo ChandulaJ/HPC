@@ -401,6 +401,14 @@
                         Data Preprocessing
                     </div>
                     <p style="margin-bottom: 20px; color: #666;">Prepare genome data with chromosome and line number formatting</p>
+                    <div class="input-group">
+                        <label for="input-file-path">Input File Path:</label>
+                        <input type="text" id="input-file-path" value="/home/cj/HPC_data/Human_genome.fna" placeholder="Enter input genome file path (e.g., /path/to/genome.txt)" maxlength="255">
+                    </div>
+                    <div class="input-group">
+                        <label for="output-file-path">Output File Path:</label>
+                        <input type="text" id="output-file-path" value="/home/cj/HPC_data/Human_genome_preprocessed.fna" placeholder="Enter output file path (e.g., /path/to/processed_genome.txt)" maxlength="255">
+                    </div>
                     <button class="btn btn-preprocessing" onclick="runPreprocessing()">
                         Run Preprocessing
                     </button>
@@ -581,7 +589,6 @@ Performance metrics will appear here after running searches...
     <script>
         const API_BASE = 'http://localhost:3000/api';
         const performanceData = {
-            preprocessing: null,
             serial: null,
             openmp: null,
             cuda: null,
@@ -616,13 +623,12 @@ Performance metrics will appear here after running searches...
         function clearOutput(component) {
             const output = document.getElementById(component + '-output');
             if (output) {
-                output.textContent = `Ready for ${component} ${component === 'preprocessing' ? '...' : 'search...'}`;
+                output.textContent = `Ready for ${component} search...`;
             }
         }
 
         // Clear all output windows
         function clearAllOutputs() {
-            clearOutput('preprocessing');
             clearOutput('serial');
             clearOutput('openmp');
             clearOutput('cuda');
@@ -741,7 +747,7 @@ Performance metrics will appear here after running searches...
                     `;
 
                     validData.forEach(([key, value]) => {
-                        if (key !== 'serial' && key !== 'preprocessing') {
+                        if (key !== 'serial') {
                             const speedup = baseline.executionTime / value.executionTime;
                             const name = key.charAt(0).toUpperCase() + key.slice(1);
                             const color = getComponentColor(key);
@@ -792,7 +798,6 @@ Performance metrics will appear here after running searches...
         // Helper function to get component colors
         function getComponentColor(component) {
             const colors = {
-                'preprocessing': '#3498db',
                 'serial': '#e74c3c',
                 'openmp': '#f39c12',
                 'cuda': '#27ae60',
@@ -824,13 +829,15 @@ Performance metrics will appear here after running searches...
                         addOutput(component, result.output);
                     }
                     
-                    // Update performance data
-                    const perfData = {
-                        executionTime: result.executionTime || 0,
-                        totalMatches: result.totalMatches,
-                        threads: result.threads
-                    };
-                    updatePerformance(component, perfData);
+                    // Update performance data (exclude preprocessing)
+                    if (component !== 'preprocessing') {
+                        const perfData = {
+                            executionTime: result.executionTime || 0,
+                            totalMatches: result.totalMatches,
+                            threads: result.threads
+                        };
+                        updatePerformance(component, perfData);
+                    }
                     
                     if (result.executionTime) {
                         addOutput(component, `⏱️ Execution time: ${result.executionTime} seconds`);
@@ -864,7 +871,23 @@ Performance metrics will appear here after running searches...
 
         // Run preprocessing
         async function runPreprocessing() {
-            await runCommand('preprocessing', 'preprocessing');
+            const inputFilePath = document.getElementById('input-file-path').value.trim();
+            const outputFilePath = document.getElementById('output-file-path').value.trim();
+            
+            if (!inputFilePath) {
+                addOutput('preprocessing', '❌ Please enter an input file path for preprocessing');
+                return;
+            }
+            
+            if (!outputFilePath) {
+                addOutput('preprocessing', '❌ Please enter an output file path for preprocessing');
+                return;
+            }
+
+            await runCommand('preprocessing', 'preprocessing', { 
+                inputFilePath: inputFilePath,
+                outputFilePath: outputFilePath 
+            });
         }
 
         // Run serial search
@@ -929,9 +952,7 @@ Performance metrics will appear here after running searches...
 
         // Initialize the interface
         document.addEventListener('DOMContentLoaded', function() {
-            addOutput('preprocessing', '🚀 HPC Genome Search Interface initialized!');
-            addOutput('preprocessing', '📝 Run preprocessing first to prepare genome data');
-            
+            addOutput('serial', '🚀 HPC Genome Search Interface initialized!');
             addOutput('serial', '🚀 Ready for serial search');
             addOutput('serial', '📝 Enter DNA patterns (e.g., ATCG, GCTA)');
             
