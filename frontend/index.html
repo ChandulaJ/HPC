@@ -392,6 +392,19 @@
         </div>
 
         <div class="main-content">
+            <!-- Common Input Section -->
+            <div class="execution-card" style="margin-bottom: 30px; border: 2px solid #667eea; background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));">
+                <div class="card-title" style="color: #667eea; margin-bottom: 20px;">
+                    <div class="card-icon" style="background-color: #667eea;"></div>
+                    📁 Common Search File
+                </div>
+                <p style="margin-bottom: 20px; color: #666;">Specify the input file that all search algorithms will use</p>
+                <div class="input-group">
+                    <label for="common-filename">Search Input File:</label>
+                    <input type="text" id="common-filename" value="/home/cj/HPC_data/Human_genome_preprocessed.fna" placeholder="Enter path to search file" maxlength="255">
+                </div>
+            </div>
+
             <div class="execution-grid">
                 <!-- Preprocessing Card -->
                 <div class="execution-card">
@@ -893,22 +906,34 @@ Performance metrics will appear here after running searches...
         // Run serial search
         async function runSerial() {
             const pattern = document.getElementById('serial-pattern').value.trim();
+            const filename = document.getElementById('common-filename').value.trim();
             
             if (!pattern) {
                 addOutput('serial', '❌ Please enter a search pattern for serial search');
                 return;
             }
 
-            await runCommand('serial', 'serial', { pattern });
+            if (!filename) {
+                addOutput('serial', '❌ Please enter a filename in the common input field');
+                return;
+            }
+
+            await runCommand('serial', 'serial', { pattern, filename });
         }
 
         // Run OpenMP search
         async function runOpenMP() {
             const pattern = document.getElementById('openmp-pattern').value.trim();
+            const filename = document.getElementById('common-filename').value.trim();
             const threads = parseInt(document.getElementById('thread-count').value);
             
             if (!pattern) {
                 addOutput('openmp', '❌ Please enter a search pattern for OpenMP search');
+                return;
+            }
+
+            if (!filename) {
+                addOutput('openmp', '❌ Please enter a filename in the common input field');
                 return;
             }
 
@@ -917,28 +942,40 @@ Performance metrics will appear here after running searches...
                 return;
             }
 
-            await runCommand('openmp', 'openmp', { pattern, threads });
+            await runCommand('openmp', 'openmp', { pattern, filename, threads });
         }
 
         // Run CUDA search
         async function runCUDA() {
             const pattern = document.getElementById('cuda-pattern').value.trim();
+            const filename = document.getElementById('common-filename').value.trim();
             
             if (!pattern) {
                 addOutput('cuda', '❌ Please enter a search pattern for CUDA search');
                 return;
             }
 
-            await runCommand('cuda', 'cuda', { pattern });
+            if (!filename) {
+                addOutput('cuda', '❌ Please enter a filename in the common input field');
+                return;
+            }
+
+            await runCommand('cuda', 'cuda', { pattern, filename });
         }
 
         // Run Hybrid search
         async function runHybrid() {
             const pattern = document.getElementById('hybrid-pattern').value.trim();
+            const filename = document.getElementById('common-filename').value.trim();
             const threads = parseInt(document.getElementById('hybrid-thread-count').value);
             
             if (!pattern) {
                 addOutput('hybrid', '❌ Please enter a search pattern for hybrid search');
+                return;
+            }
+
+            if (!filename) {
+                addOutput('hybrid', '❌ Please enter a filename in the common input field');
                 return;
             }
 
@@ -947,7 +984,7 @@ Performance metrics will appear here after running searches...
                 return;
             }
 
-            await runCommand('hybrid', 'hybrid', { pattern, threads });
+            await runCommand('hybrid', 'hybrid', { pattern, filename, threads });
         }
 
         // Initialize the interface
