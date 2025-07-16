@@ -13,7 +13,7 @@
 #define THREADS_PER_BLOCK 512
 #define SHARED_MEM_SIZE 256
 #define NUM_STREAMS 4
-#define NUM_GPU_DEVICES 1
+#define MAX_GPU_DEVICES 8  // Support for multiple GPU devices
 
 // Structure for batch processing data
 typedef struct {
@@ -30,6 +30,27 @@ typedef struct {
     int matchCount;
     int batchId;
 } SearchResult;
+
+// Structure for GPU device context
+typedef struct {
+    cudaStream_t streams[NUM_STREAMS];
+    cudaEvent_t start, stop;
+    
+    // Device memory pointers
+    char *d_lines;
+    char *d_pattern;
+    int *d_matchIndices;
+    int *d_matchCount;
+    
+    // Host memory
+    BatchData *batches;
+    SearchResult *results;
+    
+    // Processing stats
+    float totalTime;
+    int batchesProcessed;
+    int totalMatches;
+} GPUContext;
 
 // CUDA kernel for pattern matching with shared memory optimization
 __global__ void hybridSearchKernel(
@@ -84,95 +105,281 @@ __global__ void hybridSearchKernel(
     }
 }
 
-// OpenMP-accelerated file reading and preprocessing
-int loadBatchData(FILE *infile, BatchData *batch, char *buffer __attribute__((unused)), char *lineBuffer) {
-    int batchLineCount = 0;
+// Initialize GPU context
+int initializeGPUContext(GPUContext *ctx, const char *pattern) {
+    ctx->totalTime = 0;
+    ctx->batchesProcessed = 0;
+    ctx->totalMatches = 0;
     
-    // Sequential file reading (file I/O must be sequential)
-    while (batchLineCount < BATCH_SIZE && fgets(lineBuffer, MAX_LINE_LENGTH, infile)) {
-        // Copy line to batch buffer
-        int lineLen = strlen(lineBuffer);
-        
-        // Remove newline characters
-        if (lineLen > 0 && (lineBuffer[lineLen-1] == '\n' || lineBuffer[lineLen-1] == '\r')) {
-            lineBuffer[lineLen-1] = '\0';
-            lineLen--;
-        }
-        if (lineLen > 0 && (lineBuffer[lineLen-1] == '\n' || lineBuffer[lineLen-1] == '\r')) {
-            lineBuffer[lineLen-1] = '\0';
-            lineLen--;
-        }
-        
-        // Copy to batch lines buffer
-        memcpy(batch->lines + batchLineCount * MAX_LINE_LENGTH, lineBuffer, lineLen + 1);
-        
-        // Extract metadata in parallel
-        char *underscore = strchr(lineBuffer, '_');
-        char *pipe = strchr(lineBuffer, '|');
-        
-        if (underscore && pipe && underscore < pipe) {
-            int len_chromo = underscore - lineBuffer;
-            int len_lineNum = pipe - underscore - 1;
-            
-            // Ensure we don't exceed buffer limits
-            if (len_chromo < MAX_META_LENGTH && len_lineNum < MAX_META_LENGTH) {
-                strncpy(batch->chromo[batchLineCount], lineBuffer, len_chromo);
-                batch->chromo[batchLineCount][len_chromo] = '\0';
-                
-                strncpy(batch->lineNum[batchLineCount], underscore + 1, len_lineNum);
-                batch->lineNum[batchLineCount][len_lineNum] = '\0';
-            } else {
-                strcpy(batch->chromo[batchLineCount], "NA");
-                strcpy(batch->lineNum[batchLineCount], "NA");
-            }
-        } else {
-            strcpy(batch->chromo[batchLineCount], "NA");
-            strcpy(batch->lineNum[batchLineCount], "NA");
-        }
-        
-        batchLineCount++;
+    // Set device 0
+    if (cudaSetDevice(0) != cudaSuccess) {
+        fprintf(stderr, "Failed to set device 0\n");
+        return -1;
     }
     
-    // Use OpenMP to process metadata extraction in parallel after loading
-    if (batchLineCount > 0) {
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < batchLineCount; i++) {
-            // Additional processing can go here if needed
-            // For now, metadata is already extracted above
+    // Create streams and events
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        if (cudaStreamCreate(&ctx->streams[i]) != cudaSuccess) {
+            fprintf(stderr, "Failed to create stream %d\n", i);
+            return -1;
         }
     }
     
-    batch->lineCount = batchLineCount;
-    return batchLineCount;
+    if (cudaEventCreate(&ctx->start) != cudaSuccess || 
+        cudaEventCreate(&ctx->stop) != cudaSuccess) {
+        fprintf(stderr, "Failed to create events\n");
+        return -1;
+    }
+    
+    // Allocate device memory
+    if (cudaMalloc(&ctx->d_lines, BATCH_SIZE * MAX_LINE_LENGTH) != cudaSuccess ||
+        cudaMalloc(&ctx->d_pattern, strlen(pattern) + 1) != cudaSuccess ||
+        cudaMalloc(&ctx->d_matchIndices, BATCH_SIZE * sizeof(int)) != cudaSuccess ||
+        cudaMalloc(&ctx->d_matchCount, sizeof(int)) != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate device memory\n");
+        return -1;
+    }
+    
+    // Copy pattern to device
+    if (cudaMemcpy(ctx->d_pattern, pattern, strlen(pattern) + 1, cudaMemcpyHostToDevice) != cudaSuccess) {
+        fprintf(stderr, "Failed to copy pattern to device\n");
+        return -1;
+    }
+    
+    // Allocate host memory
+    ctx->batches = (BatchData*)malloc(sizeof(BatchData));
+    ctx->results = (SearchResult*)malloc(sizeof(SearchResult));
+    
+    if (!ctx->batches || !ctx->results) {
+        fprintf(stderr, "Failed to allocate host memory\n");
+        return -1;
+    }
+    
+    // Allocate pinned host memory
+    if (cudaMallocHost(&ctx->batches->lines, BATCH_SIZE * MAX_LINE_LENGTH) != cudaSuccess ||
+        cudaMallocHost(&ctx->batches->chromo, BATCH_SIZE * sizeof(char[MAX_META_LENGTH])) != cudaSuccess ||
+        cudaMallocHost(&ctx->batches->lineNum, BATCH_SIZE * sizeof(char[MAX_META_LENGTH])) != cudaSuccess ||
+        cudaMallocHost(&ctx->results->matchIndices, BATCH_SIZE * sizeof(int)) != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate pinned host memory\n");
+        return -1;
+    }
+    
+    return 0;
 }
 
-// OpenMP-accelerated result processing
-void processResults(SearchResult *result, BatchData *batch, const char *pattern) {
-    if (result->matchCount > 0) {
-        #pragma omp parallel for schedule(dynamic, 16)
-        for (int i = 0; i < result->matchCount; i++) {
-            int idx = result->matchIndices[i];
-            if (idx >= 0 && idx < batch->lineCount) {
-                #pragma omp critical
+// Cleanup GPU context
+void cleanupGPUContext(GPUContext *ctx) {
+    cudaSetDevice(0);
+    
+    // Free device memory
+    if (ctx->d_lines) cudaFree(ctx->d_lines);
+    if (ctx->d_pattern) cudaFree(ctx->d_pattern);
+    if (ctx->d_matchIndices) cudaFree(ctx->d_matchIndices);
+    if (ctx->d_matchCount) cudaFree(ctx->d_matchCount);
+    
+    // Destroy streams and events
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaStreamDestroy(ctx->streams[i]);
+    }
+    cudaEventDestroy(ctx->start);
+    cudaEventDestroy(ctx->stop);
+    
+    // Free host memory
+    if (ctx->batches) {
+        if (ctx->batches->lines) cudaFreeHost(ctx->batches->lines);
+        if (ctx->batches->chromo) cudaFreeHost(ctx->batches->chromo);
+        if (ctx->batches->lineNum) cudaFreeHost(ctx->batches->lineNum);
+        free(ctx->batches);
+    }
+    if (ctx->results) {
+        if (ctx->results->matchIndices) cudaFreeHost(ctx->results->matchIndices);
+        free(ctx->results);
+    }
+}
+
+// Process file using OpenMP threads coordinating CUDA operations
+void processFileWithOpenMP(GPUContext *ctx, FILE *file, const char *pattern, int numCpuThreads) {
+    char *lineBuffer = (char*)malloc(MAX_LINE_LENGTH);
+    
+    if (!lineBuffer) {
+        fprintf(stderr, "Failed to allocate line buffer\n");
+        return;
+    }
+    
+    int currentBatch = 0;
+    
+    printf("Processing file with %d OpenMP threads\n", numCpuThreads);
+    
+    while (!feof(file)) {
+        ctx->batches->batchId = currentBatch;
+        
+        // Load batch data sequentially
+        int batchLineCount = 0;
+        while (batchLineCount < BATCH_SIZE && fgets(lineBuffer, MAX_LINE_LENGTH, file)) {
+            int lineLen = strlen(lineBuffer);
+            
+            // Remove newline characters
+            if (lineLen > 0 && (lineBuffer[lineLen-1] == '\n' || lineBuffer[lineLen-1] == '\r')) {
+                lineBuffer[lineLen-1] = '\0';
+                lineLen--;
+            }
+            if (lineLen > 0 && (lineBuffer[lineLen-1] == '\n' || lineBuffer[lineLen-1] == '\r')) {
+                lineBuffer[lineLen-1] = '\0';
+                lineLen--;
+            }
+            
+            // Copy to batch lines buffer
+            memcpy(ctx->batches->lines + batchLineCount * MAX_LINE_LENGTH, lineBuffer, lineLen + 1);
+            batchLineCount++;
+        }
+        
+        if (batchLineCount == 0) break;
+        
+        // OpenMP parallel section
+        #pragma omp parallel num_threads(numCpuThreads)
+        {
+            int thread_id = omp_get_thread_num();
+            int num_threads = omp_get_num_threads();
+            
+            // Parallel metadata extraction
+            int lines_per_thread = (batchLineCount + num_threads - 1) / num_threads;
+            int start_idx = thread_id * lines_per_thread;
+            int end_idx = (start_idx + lines_per_thread > batchLineCount) ? batchLineCount : start_idx + lines_per_thread;
+            
+            for (int i = start_idx; i < end_idx; i++) {
+                char *line = ctx->batches->lines + i * MAX_LINE_LENGTH;
+                char *underscore = strchr(line, '_');
+                char *pipe = strchr(line, '|');
+                
+                if (underscore && pipe && underscore < pipe) {
+                    int len_chromo = underscore - line;
+                    int len_lineNum = pipe - underscore - 1;
+                    
+                    if (len_chromo < MAX_META_LENGTH && len_lineNum < MAX_META_LENGTH) {
+                        strncpy(ctx->batches->chromo[i], line, len_chromo);
+                        ctx->batches->chromo[i][len_chromo] = '\0';
+                        
+                        strncpy(ctx->batches->lineNum[i], underscore + 1, len_lineNum);
+                        ctx->batches->lineNum[i][len_lineNum] = '\0';
+                    } else {
+                        strcpy(ctx->batches->chromo[i], "NA");
+                        strcpy(ctx->batches->lineNum[i], "NA");
+                    }
+                } else {
+                    strcpy(ctx->batches->chromo[i], "NA");
+                    strcpy(ctx->batches->lineNum[i], "NA");
+                }
+            }
+            
+            #pragma omp barrier
+            
+            // Master thread handles CUDA operations
+            #pragma omp master
+            {
+                ctx->batches->lineCount = batchLineCount;
+                cudaStream_t currentStream = ctx->streams[currentBatch % NUM_STREAMS];
+                
+                cudaEventRecord(ctx->start, currentStream);
+                
+                if (cudaMemcpyAsync(ctx->d_lines, ctx->batches->lines, batchLineCount * MAX_LINE_LENGTH, 
+                                   cudaMemcpyHostToDevice, currentStream) == cudaSuccess &&
+                    cudaMemsetAsync(ctx->d_matchCount, 0, sizeof(int), currentStream) == cudaSuccess) {
+                    
+                    int numBlocks = (batchLineCount + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+                    hybridSearchKernel<<<numBlocks, THREADS_PER_BLOCK, SHARED_MEM_SIZE, currentStream>>>(
+                        ctx->d_lines, ctx->d_pattern, (int)strlen(pattern), batchLineCount, 
+                        ctx->d_matchIndices, ctx->d_matchCount);
+                    
+                    if (cudaGetLastError() == cudaSuccess) {
+                        if (cudaMemcpyAsync(&ctx->results->matchCount, ctx->d_matchCount, sizeof(int), 
+                                           cudaMemcpyDeviceToHost, currentStream) == cudaSuccess) {
+                            cudaStreamSynchronize(currentStream);
+                            
+                            if (ctx->results->matchCount > 0) {
+                                cudaMemcpyAsync(ctx->results->matchIndices, ctx->d_matchIndices, 
+                                               ctx->results->matchCount * sizeof(int), 
+                                               cudaMemcpyDeviceToHost, currentStream);
+                                cudaStreamSynchronize(currentStream);
+                            }
+                            
+                            cudaEventRecord(ctx->stop, currentStream);
+                            cudaEventSynchronize(ctx->stop);
+                            
+                            float batchTime;
+                            cudaEventElapsedTime(&batchTime, ctx->start, ctx->stop);
+                            ctx->totalTime += batchTime;
+                            ctx->totalMatches += ctx->results->matchCount;
+                        }
+                    }
+                }
+            }
+            
+            #pragma omp barrier
+            
+            // Parallel result processing - prepare formatted results
+            if (ctx->results->matchCount > 0) {
+                // Allocate local storage for formatted results
+                static char **formattedResults = NULL;
+                static int *validResults = NULL;
+                
+                #pragma omp master
                 {
-                    printf("Pattern '%s' found at chromosome %s, line %s (Batch %d)\n", 
-                           pattern, batch->chromo[idx], batch->lineNum[idx], batch->batchId);
+                    formattedResults = (char**)malloc(ctx->results->matchCount * sizeof(char*));
+                    validResults = (int*)malloc(ctx->results->matchCount * sizeof(int));
+                    for (int i = 0; i < ctx->results->matchCount; i++) {
+                        formattedResults[i] = (char*)malloc(512 * sizeof(char)); // 512 chars per result
+                        validResults[i] = 0; // Initialize as invalid
+                    }
+                }
+                
+                #pragma omp barrier
+                
+                // Parallel formatting of results
+                #pragma omp for schedule(dynamic, 4)
+                for (int i = 0; i < ctx->results->matchCount; i++) {
+                    int idx = ctx->results->matchIndices[i];
+                    if (idx >= 0 && idx < ctx->batches->lineCount) {
+                        snprintf(formattedResults[i], 512,
+                                "Thread %d - Pattern '%s' found at chromosome %s, line %s (Batch %d)",
+                                thread_id, pattern, ctx->batches->chromo[idx], 
+                                ctx->batches->lineNum[idx], ctx->batches->batchId);
+                        validResults[i] = 1; // Mark as valid
+                    }
+                }
+                
+                #pragma omp barrier
+                
+                // Sequential output by master thread
+                #pragma omp master
+                {
+                    for (int i = 0; i < ctx->results->matchCount; i++) {
+                        if (validResults[i]) {
+                            printf("%s\n", formattedResults[i]);
+                        }
+                    }
+                    
+                    // Cleanup
+                    for (int i = 0; i < ctx->results->matchCount; i++) {
+                        free(formattedResults[i]);
+                    }
+                    free(formattedResults);
+                    free(validResults);
+                    formattedResults = NULL;
+                    validResults = NULL;
                 }
             }
         }
+        
+        ctx->batchesProcessed++;
+        currentBatch++;
     }
-}
-
-// Multi-GPU support function
-int getOptimalDeviceCount() {
-    int deviceCount = 0;
-    cudaGetDeviceCount(&deviceCount);
-    return (deviceCount > NUM_GPU_DEVICES) ? NUM_GPU_DEVICES : deviceCount;
+    
+    free(lineBuffer);
 }
 
 int main() {
     // File and pattern setup
-    char inputFileLocation[] = "/home/cj/HPC_data/Human_genome_preprocessed.fna";  // Test with known data first
+    char inputFileLocation[] = "/home/cj/HPC_data/Human_genome_preprocessed.fna";
     char pattern[MAX_LINE_LENGTH];
     FILE *infile = NULL;
     
@@ -182,36 +389,13 @@ int main() {
     
     // Performance monitoring
     double totalStartTime, totalEndTime;
-    float cudaTotalTime = 0;
-    
-    // Memory and processing variables
-    char *buffer = NULL;
-    char *lineBuffer = NULL;
-    int totalLineCount = 0;
-    int totalMatchCount = 0;
-    int currentBatch = 0;
-    
-    // CUDA variables
-    cudaStream_t streams[NUM_STREAMS];
-    cudaEvent_t start, stop;
-    cudaError_t cudaStatus = cudaSuccess;
-    
-    // Device memory pointers
-    char *d_lines = NULL;
-    char *d_pattern = NULL;
-    int *d_matchIndices = NULL;
-    int *d_matchCount = NULL;
-    
-    // Host memory for batches
-    BatchData *batches = NULL;
-    SearchResult *results = NULL;
     
     printf("=== Hybrid CUDA-OpenMP Search System ===\n");
     printf("Available CPU threads: %d\n", maxCpuThreads);
     
-    // Get GPU information
-    int deviceCount = getOptimalDeviceCount();
-    if (deviceCount == 0) {
+    // Check for CUDA device
+    int deviceCount;
+    if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
         fprintf(stderr, "No CUDA-capable devices found!\n");
         return 1;
     }
@@ -219,7 +403,6 @@ int main() {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     printf("Using GPU: %s\n", prop.name);
-    printf("Available GPU devices: %d\n", deviceCount);
     
     // Get user input
     printf("Enter pattern to search: ");
@@ -228,7 +411,7 @@ int main() {
         return 1;
     }
     
-    printf("Enter number of CPU threads to use (1-%d): ", maxCpuThreads);
+    printf("Enter number of OpenMP threads (1-%d): ", maxCpuThreads);
     if (scanf("%d", &numCpuThreads) != 1) {
         fprintf(stderr, "Error reading thread count\n");
         numCpuThreads = maxCpuThreads;
@@ -237,190 +420,52 @@ int main() {
         numCpuThreads = maxCpuThreads;
     }
     
-    omp_set_num_threads(numCpuThreads);
-    
     printf("\nConfiguration:\n");
     printf("- Pattern: %s\n", pattern);
-    printf("- CPU Threads: %d\n", numCpuThreads);
+    printf("- GPU Device: %s\n", prop.name);
+    printf("- OpenMP Threads: %d\n", numCpuThreads);
     printf("- Batch Size: %d lines\n", BATCH_SIZE);
     printf("- CUDA Streams: %d\n", NUM_STREAMS);
     printf("============================================================================\n");
-    
-    // Initialize CUDA
-    cudaSetDevice(0);
-    cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
-    
-    // Create CUDA streams and events
-    for (int i = 0; i < NUM_STREAMS; i++) {
-        if (cudaStreamCreate(&streams[i]) != cudaSuccess) {
-            fprintf(stderr, "Failed to create CUDA stream %d\n", i);
-            goto Error;
-        }
-    }
-    
-    if (cudaEventCreate(&start) != cudaSuccess || cudaEventCreate(&stop) != cudaSuccess) {
-        fprintf(stderr, "Failed to create CUDA events\n");
-        goto Error;
-    }
-    
-    // Allocate memory
-    buffer = (char*)malloc(READ_BUFFER_SIZE);
-    lineBuffer = (char*)malloc(MAX_LINE_LENGTH);
-    batches = (BatchData*)malloc(sizeof(BatchData));
-    results = (SearchResult*)malloc(sizeof(SearchResult));
-    
-    if (!buffer || !lineBuffer || !batches || !results) {
-        fprintf(stderr, "Failed to allocate host memory\n");
-        goto Error;
-    }
-    
-    // Allocate pinned host memory for better transfer performance
-    if (cudaMallocHost(&batches->lines, BATCH_SIZE * MAX_LINE_LENGTH) != cudaSuccess ||
-        cudaMallocHost(&batches->chromo, BATCH_SIZE * sizeof(char[MAX_META_LENGTH])) != cudaSuccess ||
-        cudaMallocHost(&batches->lineNum, BATCH_SIZE * sizeof(char[MAX_META_LENGTH])) != cudaSuccess ||
-        cudaMallocHost(&results->matchIndices, BATCH_SIZE * sizeof(int)) != cudaSuccess) {
-        fprintf(stderr, "Failed to allocate pinned host memory\n");
-        goto Error;
-    }
-    
-    // Allocate device memory
-    if (cudaMalloc(&d_lines, BATCH_SIZE * MAX_LINE_LENGTH) != cudaSuccess ||
-        cudaMalloc(&d_pattern, strlen(pattern) + 1) != cudaSuccess ||
-        cudaMalloc(&d_matchIndices, BATCH_SIZE * sizeof(int)) != cudaSuccess ||
-        cudaMalloc(&d_matchCount, sizeof(int)) != cudaSuccess) {
-        fprintf(stderr, "Failed to allocate device memory\n");
-        goto Error;
-    }
-    
-    // Copy pattern to device
-    if (cudaMemcpy(d_pattern, pattern, strlen(pattern) + 1, cudaMemcpyHostToDevice) != cudaSuccess) {
-        fprintf(stderr, "Failed to copy pattern to device\n");
-        goto Error;
-    }
     
     // Open file
     infile = fopen(inputFileLocation, "r");
     if (!infile) {
         perror("Error opening file");
-        goto Error;
+        return 1;
     }
     
-    if (setvbuf(infile, buffer, _IOFBF, READ_BUFFER_SIZE) != 0) {
-        fprintf(stderr, "Warning: Could not set file buffer\n");
+    // Initialize GPU context
+    GPUContext gpuContext;
+    if (initializeGPUContext(&gpuContext, pattern) != 0) {
+        fprintf(stderr, "Failed to initialize GPU\n");
+        fclose(infile);
+        return 1;
     }
     
+    printf("Starting hybrid CUDA-OpenMP search...\n");
     totalStartTime = omp_get_wtime();
     
-    printf("Starting hybrid search...\n");
-    
-    // Main processing loop
-    while (!feof(infile)) {
-        batches->batchId = currentBatch;
-        
-        // Load batch data using OpenMP
-        int batchLineCount = loadBatchData(infile, batches, buffer, lineBuffer);
-        if (batchLineCount == 0) break;
-        
-        cudaStream_t currentStream = streams[currentBatch % NUM_STREAMS];
-        
-        // Record CUDA timing
-        cudaEventRecord(start, currentStream);
-        
-        // Copy data to device asynchronously
-        if (cudaMemcpyAsync(d_lines, batches->lines, batchLineCount * MAX_LINE_LENGTH, 
-                           cudaMemcpyHostToDevice, currentStream) != cudaSuccess ||
-            cudaMemsetAsync(d_matchCount, 0, sizeof(int), currentStream) != cudaSuccess) {
-            fprintf(stderr, "Device memory operations failed\n");
-            goto Error;
-        }
-        
-        // Launch hybrid kernel
-        int numBlocks = (batchLineCount + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-        hybridSearchKernel<<<numBlocks, THREADS_PER_BLOCK, SHARED_MEM_SIZE, currentStream>>>(
-            d_lines, d_pattern, (int)strlen(pattern), batchLineCount, d_matchIndices, d_matchCount);
-        
-        if (cudaGetLastError() != cudaSuccess) {
-            fprintf(stderr, "Kernel launch failed\n");
-            goto Error;
-        }
-        
-        // Copy results back
-        if (cudaMemcpyAsync(&results->matchCount, d_matchCount, sizeof(int), 
-                           cudaMemcpyDeviceToHost, currentStream) != cudaSuccess) {
-            fprintf(stderr, "Match count copy failed\n");
-            goto Error;
-        }
-        
-        cudaStreamSynchronize(currentStream);
-        
-        if (results->matchCount > 0) {
-            if (cudaMemcpyAsync(results->matchIndices, d_matchIndices, 
-                               results->matchCount * sizeof(int), 
-                               cudaMemcpyDeviceToHost, currentStream) != cudaSuccess) {
-                fprintf(stderr, "Match indices copy failed\n");
-                goto Error;
-            }
-            cudaStreamSynchronize(currentStream);
-        }
-        
-        cudaEventRecord(stop, currentStream);
-        cudaEventSynchronize(stop);
-        
-        float batchTime;
-        cudaEventElapsedTime(&batchTime, start, stop);
-        cudaTotalTime += batchTime;
-        
-        // Process results using OpenMP
-        results->batchId = currentBatch;
-        processResults(results, batches, pattern);
-        
-        totalMatchCount += results->matchCount;
-        totalLineCount += batchLineCount;
-        currentBatch++;
-    }
+    // Process file with OpenMP coordinating CUDA operations
+    processFileWithOpenMP(&gpuContext, infile, pattern, numCpuThreads);
     
     totalEndTime = omp_get_wtime();
     
+    // Display results
     printf("\n============================================================================\n");
-    printf("Hybrid Search Results:\n");
-    printf("- Total lines processed: %d\n", totalLineCount);
-    printf("- Total batches: %d\n", currentBatch);
-    printf("- Total matches found: %d\n", totalMatchCount);
-    printf("- CPU threads used: %d\n", numCpuThreads);
-    printf("- CUDA time: %.6f seconds\n", cudaTotalTime / 1000.0);
-    printf("- Total time: %.6f seconds\n", totalEndTime - totalStartTime);
-    printf("- Performance improvement: %.2fx vs serial\n", 
-           (totalEndTime - totalStartTime) > 0 ? 1.0 / (totalEndTime - totalStartTime) : 0);
+    printf("Hybrid CUDA-OpenMP Search Results:\n");
+    printf("- Batches processed: %d\n", gpuContext.batchesProcessed);
+    printf("- Total matches found: %d\n", gpuContext.totalMatches);
+    printf("- GPU time: %.6f seconds\n", gpuContext.totalTime / 1000.0);
+    printf("- Total wall time: %.6f seconds\n", totalEndTime - totalStartTime);
+    printf("- OpenMP threads used: %d\n", numCpuThreads);
+    printf("- Efficiency ratio: %.2f%%\n", 
+           ((gpuContext.totalTime / 1000.0) / (totalEndTime - totalStartTime)) * 100.0);
     printf("============================================================================\n");
-
-Error:
+    
     // Cleanup
-    if (infile) fclose(infile);
-    if (buffer) free(buffer);
-    if (lineBuffer) free(lineBuffer);
-    if (batches) {
-        if (batches->lines) cudaFreeHost(batches->lines);
-        if (batches->chromo) cudaFreeHost(batches->chromo);
-        if (batches->lineNum) cudaFreeHost(batches->lineNum);
-        free(batches);
-    }
-    if (results) {
-        if (results->matchIndices) cudaFreeHost(results->matchIndices);
-        free(results);
-    }
+    cleanupGPUContext(&gpuContext);
+    fclose(infile);
     
-    // CUDA cleanup
-    if (d_lines) cudaFree(d_lines);
-    if (d_pattern) cudaFree(d_pattern);
-    if (d_matchIndices) cudaFree(d_matchIndices);
-    if (d_matchCount) cudaFree(d_matchCount);
-    
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    for (int i = 0; i < NUM_STREAMS; i++) {
-        cudaStreamDestroy(streams[i]);
-    }
-    cudaDeviceReset();
-    
-    return (cudaStatus == cudaSuccess) ? 0 : 1;
+    return 0;
 }

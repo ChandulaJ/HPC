@@ -680,7 +680,7 @@ Performance metrics will appear here after running searches...
                 const name = key.charAt(0).toUpperCase() + key.slice(1);
                 const percentage = (value.executionTime / maxTime) * 100;
                 const color = getComponentColor(key);
-                const rank = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                const rank = index === 0 ? '1️⃣' : index === 1 ? '2️⃣' : index === 2 ? '3️⃣': index === 3 ? '4️⃣' : `${index + 1}.`;
                 
                 html += `
                     <div style="margin-bottom: 12px;">
