@@ -197,6 +197,107 @@
             background: #c0392b;
         }
 
+        .output-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .output-window {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            border: 1px solid #e1e8ed;
+            width: 100%;
+        }
+
+        .output-window-header {
+            background: #34495e;
+            color: white;
+            padding: 12px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+        }
+
+        .output-window-title {
+            font-size: 14px;
+        }
+
+        .mini-clear-btn {
+            padding: 4px 8px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background-color 0.3s ease;
+        }
+
+        .mini-clear-btn:hover {
+            background: #c0392b;
+        }
+
+        .output-window-content {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            min-height: 240px;
+        }
+
+        .performance-section {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            border: 1px solid #e1e8ed;
+        }
+
+        .performance-header {
+            background: #2c3e50;
+            color: white;
+            padding: 12px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+        }
+
+        .performance-title {
+            font-size: 16px;
+        }
+
+        .performance-content {
+            padding: 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            background: #f8f9fa;
+            color: #2c3e50;
+            min-height: 200px;
+        }
+
+        .mini-spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 8px;
+        }
+
         .output-content {
             background: #2c3e50;
             color: #ecf0f1;
@@ -214,8 +315,25 @@
         .loading {
             display: none;
             text-align: center;
-            padding: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 6px;
+            margin: 10px;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10;
+            border: 2px solid #667eea;
+            font-size: 12px;
+            font-weight: 600;
+            color: #2c3e50;
         }
+
+        .preprocessing-loading { border-color: #3498db; }
+        .serial-loading { border-color: #e74c3c; }
+        .openmp-loading { border-color: #f39c12; }
+        .cuda-loading { border-color: #27ae60; }
 
         .spinner {
             border: 4px solid #f3f3f3;
@@ -337,18 +455,82 @@
             <!-- Output Section -->
             <div class="output-section">
                 <div class="output-header">
-                    <div class="output-title">📊 Execution Output</div>
-                    <button class="clear-btn" onclick="clearOutput()">Clear Output</button>
+                    <div class="output-title">📊 Execution Results</div>
+                    <button class="clear-btn" onclick="clearAllOutputs()">Clear All</button>
                 </div>
-                <div class="loading" id="loading">
-                    <div class="spinner"></div>
-                    <div>Executing... Please wait</div>
-                </div>
-                <div class="output-content" id="output">
-Welcome to HPC Genome Search Interface!
+                
+                <!-- Individual Output Windows -->
+                <div class="output-grid">
+                    <!-- Preprocessing Output -->
+                    <div class="output-window">
+                        <div class="output-window-header">
+                            <span class="output-window-title">🔧 Preprocessing Output</span>
+                            <button class="mini-clear-btn" onclick="clearOutput('preprocessing')">Clear</button>
+                        </div>
+                        <div class="loading preprocessing-loading" id="preprocessing-loading">
+                            <div class="mini-spinner"></div>
+                            <div>Processing...</div>
+                        </div>
+                        <div class="output-window-content" id="preprocessing-output">
+Ready for data preprocessing...
+                        </div>
+                    </div>
 
-Ready to execute preprocessing, serial search, OpenMP parallel search, or CUDA GPU search.
-Select an operation above to get started.
+                    <!-- Serial Output -->
+                    <div class="output-window">
+                        <div class="output-window-header">
+                            <span class="output-window-title">🔄 Serial Search Output</span>
+                            <button class="mini-clear-btn" onclick="clearOutput('serial')">Clear</button>
+                        </div>
+                        <div class="loading serial-loading" id="serial-loading">
+                            <div class="mini-spinner"></div>
+                            <div>Searching...</div>
+                        </div>
+                        <div class="output-window-content" id="serial-output">
+Ready for serial search...
+                        </div>
+                    </div>
+
+                    <!-- OpenMP Output -->
+                    <div class="output-window">
+                        <div class="output-window-header">
+                            <span class="output-window-title">⚡ OpenMP Search Output</span>
+                            <button class="mini-clear-btn" onclick="clearOutput('openmp')">Clear</button>
+                        </div>
+                        <div class="loading openmp-loading" id="openmp-loading">
+                            <div class="mini-spinner"></div>
+                            <div>Parallel processing...</div>
+                        </div>
+                        <div class="output-window-content" id="openmp-output">
+Ready for OpenMP parallel search...
+                        </div>
+                    </div>
+
+                    <!-- CUDA Output -->
+                    <div class="output-window">
+                        <div class="output-window-header">
+                            <span class="output-window-title">🚀 CUDA GPU Search Output</span>
+                            <button class="mini-clear-btn" onclick="clearOutput('cuda')">Clear</button>
+                        </div>
+                        <div class="loading cuda-loading" id="cuda-loading">
+                            <div class="mini-spinner"></div>
+                            <div>GPU processing...</div>
+                        </div>
+                        <div class="output-window-content" id="cuda-output">
+Ready for CUDA GPU search...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Performance Comparison Section -->
+                <div class="performance-section">
+                    <div class="performance-header">
+                        <span class="performance-title">📈 Performance Comparison</span>
+                        <button class="mini-clear-btn" onclick="clearPerformance()">Clear</button>
+                    </div>
+                    <div class="performance-content" id="performance-comparison">
+Performance metrics will appear here after running searches...
+                    </div>
                 </div>
             </div>
         </div>
@@ -356,6 +538,12 @@ Select an operation above to get started.
 
     <script>
         const API_BASE = 'http://localhost:3000/api';
+        const performanceData = {
+            preprocessing: null,
+            serial: null,
+            openmp: null,
+            cuda: null
+        };
 
         // Update status indicator
         function updateStatus(element, status) {
@@ -363,28 +551,217 @@ Select an operation above to get started.
             indicator.className = 'status-indicator status-' + status;
         }
 
-        // Show loading state
-        function showLoading(show = true) {
-            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        // Show loading state for specific component
+        function showLoading(component, show = true) {
+            const loadingElement = document.getElementById(component + '-loading');
+            if (loadingElement) {
+                loadingElement.style.display = show ? 'block' : 'none';
+            }
         }
 
-        // Add output to the display
-        function addOutput(text) {
-            const output = document.getElementById('output');
-            const timestamp = new Date().toLocaleTimeString();
-            output.textContent += `[${timestamp}] ${text}\n`;
-            output.scrollTop = output.scrollHeight;
+        // Add output to specific window
+        function addOutput(component, text) {
+            const output = document.getElementById(component + '-output');
+            if (output) {
+                const timestamp = new Date().toLocaleTimeString();
+                output.textContent += `[${timestamp}] ${text}\n`;
+                output.scrollTop = output.scrollHeight;
+            }
         }
 
-        // Clear output
-        function clearOutput() {
-            document.getElementById('output').textContent = 'Output cleared.\n';
+        // Clear specific output window
+        function clearOutput(component) {
+            const output = document.getElementById(component + '-output');
+            if (output) {
+                output.textContent = `Ready for ${component} ${component === 'preprocessing' ? '...' : 'search...'}`;
+            }
+        }
+
+        // Clear all output windows
+        function clearAllOutputs() {
+            clearOutput('preprocessing');
+            clearOutput('serial');
+            clearOutput('openmp');
+            clearOutput('cuda');
+            clearPerformance();
+        }
+
+        // Clear performance comparison
+        function clearPerformance() {
+            document.getElementById('performance-comparison').textContent = 'Performance metrics will appear here after running searches...';
+            Object.keys(performanceData).forEach(key => performanceData[key] = null);
+        }
+
+        // Update performance comparison
+        function updatePerformance(component, data) {
+            performanceData[component] = data;
+            const performanceDiv = document.getElementById('performance-comparison');
+            
+            const validData = Object.entries(performanceData).filter(([key, value]) => value !== null);
+            
+            if (validData.length === 0) {
+                performanceDiv.innerHTML = `
+                    <div style="text-align: center; color: #7f8c8d; font-style: italic;">
+                        📊 No performance data available yet.<br>
+                        Run the implementations above to see performance metrics and comparisons.
+                    </div>
+                `;
+                return;
+            }
+
+            // Sort data by execution time for better visualization
+            const sortedData = validData.sort(([,a], [,b]) => a.executionTime - b.executionTime);
+            
+            let html = `
+                <div style="margin-bottom: 25px;">
+                    <h3 style="color: #2c3e50; margin-bottom: 15px; text-align: center; font-size: 18px;">
+                        🏆 PERFORMANCE ANALYSIS DASHBOARD
+                    </h3>
+                </div>
+            `;
+
+            // Execution Times Section with visual bars
+            html += `
+                <div style="margin-bottom: 30px;">
+                    <h4 style="color: #34495e; margin-bottom: 15px; border-bottom: 2px solid #3498db; padding-bottom: 5px;">
+                        ⏱️ Execution Times
+                    </h4>
+                    <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #3498db;">
+            `;
+
+            const maxTime = Math.max(...validData.map(([,v]) => v.executionTime));
+            
+            sortedData.forEach(([key, value], index) => {
+                const name = key.charAt(0).toUpperCase() + key.slice(1);
+                const percentage = (value.executionTime / maxTime) * 100;
+                const color = getComponentColor(key);
+                const rank = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                
+                html += `
+                    <div style="margin-bottom: 12px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                            <span style="font-weight: 600; color: #2c3e50;">
+                                ${rank} ${name}
+                            </span>
+                            <span style="font-weight: bold; color: ${color};">
+                                ${value.executionTime.toFixed(3)}s
+                            </span>
+                        </div>
+                        <div style="background: #ecf0f1; height: 8px; border-radius: 4px; overflow: hidden;">
+                            <div style="background: ${color}; height: 100%; width: ${percentage}%; transition: width 0.3s ease;"></div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += `</div></div>`;
+
+            // Match Results Section
+            html += `
+                <div style="margin-bottom: 30px;">
+                    <h4 style="color: #34495e; margin-bottom: 15px; border-bottom: 2px solid #27ae60; padding-bottom: 5px;">
+                        🎯 Match Results
+                    </h4>
+                    <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #27ae60;">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+            `;
+
+            validData.forEach(([key, value]) => {
+                const name = key.charAt(0).toUpperCase() + key.slice(1);
+                const matches = value.totalMatches !== undefined ? value.totalMatches : 'N/A';
+                const color = getComponentColor(key);
+                
+                html += `
+                    <div style="background: ${color}15; border: 2px solid ${color}30; border-radius: 8px; padding: 12px; text-align: center;">
+                        <div style="font-weight: bold; color: ${color}; font-size: 16px;">${name}</div>
+                        <div style="font-size: 24px; font-weight: bold; color: #2c3e50; margin-top: 5px;">
+                            ${matches === 'N/A' ? matches : matches.toLocaleString()}
+                        </div>
+                        <div style="color: #7f8c8d; font-size: 12px;">${matches === 'N/A' ? '' : 'matches found'}</div>
+                    </div>
+                `;
+            });
+            
+            html += `</div></div></div>`;
+
+            // Speedup Analysis (if we have multiple results)
+            if (validData.length > 1) {
+                const baseline = performanceData.serial;
+                if (baseline) {
+                    html += `
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="color: #34495e; margin-bottom: 15px; border-bottom: 2px solid #e74c3c; padding-bottom: 5px;">
+                                🚀 Speedup Analysis (vs Serial)
+                            </h4>
+                            <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #e74c3c;">
+                    `;
+
+                    validData.forEach(([key, value]) => {
+                        if (key !== 'serial' && key !== 'preprocessing') {
+                            const speedup = baseline.executionTime / value.executionTime;
+                            const name = key.charAt(0).toUpperCase() + key.slice(1);
+                            const color = getComponentColor(key);
+                            const speedupText = speedup > 1 ? `${speedup.toFixed(2)}x faster` : `${(1/speedup).toFixed(2)}x slower`;
+                            const improvement = ((speedup - 1) * 100).toFixed(1);
+                            
+                            html += `
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding: 8px; background: ${color}10; border-radius: 6px;">
+                                    <span style="font-weight: 600; color: #2c3e50;">${name}</span>
+                                    <div style="text-align: right;">
+                                        <span style="font-weight: bold; color: ${speedup > 1 ? '#27ae60' : '#e74c3c'};">
+                                            ${speedupText}
+                                        </span>
+                                        <div style="font-size: 12px; color: #7f8c8d;">
+                                            ${speedup > 1 ? '+' : ''}${improvement}% performance
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }
+                    });
+                    
+                    html += `</div></div>`;
+                }
+            }
+
+            // Summary Section
+            if (validData.length > 1) {
+                const fastest = sortedData[0];
+                const slowest = sortedData[sortedData.length - 1];
+                const fastestName = fastest[0].charAt(0).toUpperCase() + fastest[0].slice(1);
+                const slowestName = slowest[0].charAt(0).toUpperCase() + slowest[0].slice(1);
+                
+                html += `
+                    <div style="margin-top: 20px; padding: 15px; background: linear-gradient(135deg, #667eea, #764ba2); color: white; border-radius: 8px; text-align: center;">
+                        <h4 style="margin-bottom: 10px;">📈 Performance Summary</h4>
+                        <div style="font-size: 14px;">
+                            <strong>${fastestName}</strong> is the fastest implementation<br>
+                            <strong>${slowestName}</strong> took ${(slowest[1].executionTime / fastest[1].executionTime).toFixed(1)}x longer
+                        </div>
+                    </div>
+                `;
+            }
+
+            performanceDiv.innerHTML = html;
+        }
+
+        // Helper function to get component colors
+        function getComponentColor(component) {
+            const colors = {
+                'preprocessing': '#3498db',
+                'serial': '#e74c3c',
+                'openmp': '#f39c12',
+                'cuda': '#27ae60'
+            };
+            return colors[component] || '#95a5a6';
         }
 
         // Generic function to run commands
-        async function runCommand(endpoint, data = {}) {
+        async function runCommand(endpoint, component, data = {}) {
             try {
-                showLoading(true);
+                showLoading(component, true);
+                updateStatus(component, 'running');
+                addOutput(component, `🔄 Starting ${component}...`);
                 
                 const response = await fetch(`${API_BASE}/${endpoint}`, {
                     method: 'POST',
@@ -397,39 +774,52 @@ Select an operation above to get started.
                 const result = await response.json();
                 
                 if (response.ok) {
-                    addOutput(`✅ ${result.message || 'Command completed successfully'}`);
+                    addOutput(component, `✅ ${result.message || 'Command completed successfully'}`);
                     if (result.output) {
-                        addOutput(result.output);
+                        addOutput(component, result.output);
                     }
+                    
+                    // Update performance data
+                    const perfData = {
+                        executionTime: result.executionTime || 0,
+                        totalMatches: result.totalMatches,
+                        threads: result.threads
+                    };
+                    updatePerformance(component, perfData);
+                    
                     if (result.executionTime) {
-                        addOutput(`⏱️ Execution time: ${result.executionTime} seconds`);
+                        addOutput(component, `⏱️ Execution time: ${result.executionTime} seconds`);
                     }
                     if (result.totalMatches !== undefined) {
-                        addOutput(`🎯 Total matches found: ${result.totalMatches}`);
+                        addOutput(component, `🎯 Total matches found: ${result.totalMatches}`);
                     }
-                    addOutput('─'.repeat(80));
+                    if (result.threads) {
+                        addOutput(component, `🧵 Used ${result.threads} threads`);
+                    }
+                    addOutput(component, '─'.repeat(50));
+                    updateStatus(component, 'ready');
                 } else {
-                    addOutput(`❌ Error: ${result.error || 'Unknown error occurred'}`);
+                    addOutput(component, `❌ Error: ${result.error || 'Unknown error occurred'}`);
                     if (result.details) {
-                        addOutput(`Details: ${result.details}`);
+                        addOutput(component, `Details: ${result.details}`);
                     }
+                    if (result.output) {
+                        addOutput(component, `Output: ${result.output}`);
+                    }
+                    updateStatus(component, 'error');
                 }
             } catch (error) {
-                addOutput(`❌ Network Error: ${error.message}`);
+                addOutput(component, `❌ Network Error: ${error.message}`);
                 console.error('Error:', error);
+                updateStatus(component, 'error');
             } finally {
-                showLoading(false);
+                showLoading(component, false);
             }
         }
 
         // Run preprocessing
         async function runPreprocessing() {
-            updateStatus('preprocessing', 'running');
-            addOutput('🔄 Starting data preprocessing...');
-            
-            await runCommand('preprocessing');
-            
-            updateStatus('preprocessing', 'ready');
+            await runCommand('preprocessing', 'preprocessing');
         }
 
         // Run serial search
@@ -437,16 +827,11 @@ Select an operation above to get started.
             const pattern = document.getElementById('serial-pattern').value.trim();
             
             if (!pattern) {
-                addOutput('❌ Please enter a search pattern for serial search');
+                addOutput('serial', '❌ Please enter a search pattern for serial search');
                 return;
             }
 
-            updateStatus('serial', 'running');
-            addOutput(`🔄 Starting serial search for pattern: "${pattern}"`);
-            
-            await runCommand('serial', { pattern });
-            
-            updateStatus('serial', 'ready');
+            await runCommand('serial', 'serial', { pattern });
         }
 
         // Run OpenMP search
@@ -455,21 +840,16 @@ Select an operation above to get started.
             const threads = parseInt(document.getElementById('thread-count').value);
             
             if (!pattern) {
-                addOutput('❌ Please enter a search pattern for OpenMP search');
+                addOutput('openmp', '❌ Please enter a search pattern for OpenMP search');
                 return;
             }
 
             if (!threads || threads < 1) {
-                addOutput('❌ Please enter a valid number of threads (minimum 1)');
+                addOutput('openmp', '❌ Please enter a valid number of threads (minimum 1)');
                 return;
             }
 
-            updateStatus('openmp', 'running');
-            addOutput(`🔄 Starting OpenMP parallel search for pattern: "${pattern}" with ${threads} threads`);
-            
-            await runCommand('openmp', { pattern, threads });
-            
-            updateStatus('openmp', 'ready');
+            await runCommand('openmp', 'openmp', { pattern, threads });
         }
 
         // Run CUDA search
@@ -477,27 +857,26 @@ Select an operation above to get started.
             const pattern = document.getElementById('cuda-pattern').value.trim();
             
             if (!pattern) {
-                addOutput('❌ Please enter a search pattern for CUDA search');
+                addOutput('cuda', '❌ Please enter a search pattern for CUDA search');
                 return;
             }
 
-            updateStatus('cuda', 'running');
-            addOutput(`🔄 Starting CUDA GPU search for pattern: "${pattern}"`);
-            
-            await runCommand('cuda', { pattern });
-            
-            updateStatus('cuda', 'ready');
+            await runCommand('cuda', 'cuda', { pattern });
         }
 
         // Initialize the interface
         document.addEventListener('DOMContentLoaded', function() {
-            addOutput('🚀 HPC Genome Search Interface initialized successfully!');
-            addOutput('📝 Instructions:');
-            addOutput('1. Run preprocessing first to prepare the genome data');
-            addOutput('2. Enter DNA patterns to search (e.g., ATCG, GCTA, etc.)');
-            addOutput('3. Choose between Serial, OpenMP, or CUDA implementations');
-            addOutput('4. View results and performance metrics below');
-            addOutput('─'.repeat(80));
+            addOutput('preprocessing', '🚀 HPC Genome Search Interface initialized!');
+            addOutput('preprocessing', '📝 Run preprocessing first to prepare genome data');
+            
+            addOutput('serial', '🚀 Ready for serial search');
+            addOutput('serial', '📝 Enter DNA patterns (e.g., ATCG, GCTA)');
+            
+            addOutput('openmp', '🚀 Ready for OpenMP parallel search');
+            addOutput('openmp', '📝 Configure threads and enter search pattern');
+            
+            addOutput('cuda', '🚀 Ready for CUDA GPU search');
+            addOutput('cuda', '📝 Enter search pattern for GPU acceleration');
         });
     </script>
 </body>
