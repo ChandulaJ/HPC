@@ -434,8 +434,8 @@
                         <input type="text" id="openmp-pattern" placeholder="Enter DNA pattern (e.g., ATCG)" maxlength="50">
                     </div>
                     <div class="input-group">
-                        <label for="thread-count">Number of Threads:</label>
-                        <input type="number" id="thread-count" min="1" max="32" value="4" placeholder="Number of threads">
+                        <label for="thread-count">CPU Threads (Max 12):</label>
+                        <input type="number" id="thread-count" min="1" max="12" value="12" placeholder="Number of threads">
                     </div>
                     <button class="btn btn-openmp" onclick="runOpenMP()">
                         Run OpenMP Search
@@ -465,14 +465,13 @@
                         <span class="status-indicator status-ready" id="hybrid-status"></span>
                         Hybrid CUDA+OpenMP Search
                     </div>
-                    <p style="margin-bottom: 15px; color: #666; font-size: 13px;">🚀 Maximum performance combining GPU and CPU acceleration</p>
                     <div class="input-group">
                         <label for="hybrid-pattern">Search Pattern:</label>
                         <input type="text" id="hybrid-pattern" placeholder="Enter DNA pattern (e.g., ATCG)" maxlength="50">
                     </div>
                     <div class="input-group">
-                        <label for="hybrid-thread-count">CPU Threads:</label>
-                        <input type="number" id="hybrid-thread-count" min="1" max="32" value="4" placeholder="Number of CPU threads">
+                        <label for="hybrid-thread-count">CPU Threads (Max 12):</label>
+                        <input type="number" id="hybrid-thread-count" min="1" max="12" value="12" placeholder="Number of CPU threads">
                     </div>
                     <button class="btn btn-hybrid" onclick="runHybrid()">
                         Run Hybrid Search

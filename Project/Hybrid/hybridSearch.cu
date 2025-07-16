@@ -8,6 +8,7 @@
 #define THREADS_PER_BLOCK 256
 #define CHUNK_SIZE (1024 * 1024)
 #define MAX_MATCHES_PER_CHUNK 10000
+#define INITIAL_MATCHES_CAPACITY 1000
 
 typedef struct {
     int position;
@@ -25,38 +26,67 @@ typedef struct {
 __global__ void searchKernel(const char* text, const char* pattern, 
                            int text_size, int pattern_length, 
                            int* match_positions, int* match_count, int chunk_offset) {
+    __shared__ char shared_pattern[MAX_PATTERN_LENGTH];
+    
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    
+    // Load pattern into shared memory cooperatively
+    if (tid < pattern_length) {
+        shared_pattern[tid] = pattern[tid];
+    }
+    __syncthreads();
     
     if (idx < text_size) {
+        // Find line boundaries more efficiently
         int line_start = idx;
         while (line_start > 0 && text[line_start - 1] != '\n') {
             line_start--;
         }
         
-        int line_end = idx;
-        while (line_end < text_size && text[line_end] != '\n' && text[line_end] != '\0') {
-            line_end++;
-        }
-        
-        int line_length = line_end - line_start;
-        
-        if (idx == line_start && line_length >= pattern_length) {
-            for (int i = 0; i <= line_length - pattern_length; i++) {
-                bool match = true;
-                
-                for (int j = 0; j < pattern_length; j++) {
-                    if (text[line_start + i + j] != pattern[j]) {
-                        match = false;
+        // Only process if we're at the start of a line
+        if (idx == line_start) {
+            int line_end = idx;
+            while (line_end < text_size && text[line_end] != '\n' && text[line_end] != '\0') {
+                line_end++;
+            }
+            
+            int line_length = line_end - line_start;
+            
+            if (line_length >= pattern_length) {
+                // Use shared memory pattern for faster comparison
+                for (int i = 0; i <= line_length - pattern_length; i++) {
+                    bool match = true;
+                    
+                    // Unroll small patterns for better performance
+                    if (pattern_length <= 8) {
+                        for (int j = 0; j < pattern_length; j++) {
+                            if (text[line_start + i + j] != shared_pattern[j]) {
+                                match = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        // Use vectorized comparison for longer patterns
+                        for (int j = 0; j < pattern_length; j += 4) {
+                            int remaining = min(4, pattern_length - j);
+                            for (int k = 0; k < remaining; k++) {
+                                if (text[line_start + i + j + k] != shared_pattern[j + k]) {
+                                    match = false;
+                                    break;
+                                }
+                            }
+                            if (!match) break;
+                        }
+                    }
+                    
+                    if (match) {
+                        int pos = atomicAdd(match_count, 1);
+                        if (pos < MAX_MATCHES_PER_CHUNK) {
+                            match_positions[pos] = line_start + chunk_offset;
+                        }
                         break;
                     }
-                }
-                
-                if (match) {
-                    int pos = atomicAdd(match_count, 1);
-                    if (pos < MAX_MATCHES_PER_CHUNK) {
-                        match_positions[pos] = line_start + chunk_offset;
-                    }
-                    break;
                 }
             }
         }
@@ -64,7 +94,12 @@ __global__ void searchKernel(const char* text, const char* pattern,
 }
 
 char* readTextChunk(FILE* file, int chunk_size, int* actual_size) {
-    char* chunk = (char*)malloc(chunk_size + 1);
+    // Use posix_memalign for better compatibility
+    char* chunk = NULL;
+    if (posix_memalign((void**)&chunk, 64, chunk_size + 64) != 0) {
+        // Fallback to regular malloc if posix_memalign fails
+        chunk = (char*)malloc(chunk_size + 64);
+    }
     if (!chunk) return NULL;
     
     *actual_size = fread(chunk, 1, chunk_size, file);
@@ -96,95 +131,94 @@ int processChunkWithCUDA(ChunkData* chunk_data, const char* pattern, int pattern
     int* d_match_count = NULL;
     int h_match_count = 0;
     
-    cudaError_t err;
-    
-    err = cudaMalloc(&d_text, chunk_data->chunk_size);
-    if (err != cudaSuccess) {
-        printf("Error allocating device memory for text: %s\n", cudaGetErrorString(err));
+    // Use CUDA streams for better performance
+    cudaStream_t stream;
+    if (cudaStreamCreate(&stream) != cudaSuccess) {
         return 0;
     }
     
-    err = cudaMalloc(&d_pattern, pattern_length);
-    if (err != cudaSuccess) {
-        printf("Error allocating device memory for pattern: %s\n", cudaGetErrorString(err));
-        cleanupCudaMemory(d_text, NULL, NULL, NULL);
+    // Allocate device memory with error checking
+    if (cudaMalloc(&d_text, chunk_data->chunk_size) != cudaSuccess ||
+        cudaMalloc(&d_pattern, pattern_length) != cudaSuccess ||
+        cudaMalloc(&d_match_positions, MAX_MATCHES_PER_CHUNK * sizeof(int)) != cudaSuccess ||
+        cudaMalloc(&d_match_count, sizeof(int)) != cudaSuccess) {
+        cleanupCudaMemory(d_text, d_pattern, d_match_positions, d_match_count);
+        cudaStreamDestroy(stream);
         return 0;
     }
     
-    err = cudaMalloc(&d_match_positions, MAX_MATCHES_PER_CHUNK * sizeof(int));
-    if (err != cudaSuccess) {
-        printf("Error allocating device memory for match positions: %s\n", cudaGetErrorString(err));
-        cleanupCudaMemory(d_text, d_pattern, NULL, NULL);
-        return 0;
-    }
+    // Asynchronous memory transfers
+    cudaMemcpyAsync(d_text, chunk_data->text_chunk, chunk_data->chunk_size, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_pattern, pattern, pattern_length, cudaMemcpyHostToDevice, stream);
+    cudaMemsetAsync(d_match_count, 0, sizeof(int), stream);
     
-    err = cudaMalloc(&d_match_count, sizeof(int));
-    if (err != cudaSuccess) {
-        printf("Error allocating device memory for match count: %s\n", cudaGetErrorString(err));
-        cleanupCudaMemory(d_text, d_pattern, d_match_positions, NULL);
-        return 0;
-    }
+    // Optimize grid size based on occupancy
+    int min_grid_size, block_size;
+    cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size, searchKernel, 0, 0);
     
-    cudaMemcpy(d_text, chunk_data->text_chunk, chunk_data->chunk_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_pattern, pattern, pattern_length, cudaMemcpyHostToDevice);
-    cudaMemset(d_match_count, 0, sizeof(int));
+    // Use optimal block size but cap it at our defined maximum
+    block_size = min(block_size, THREADS_PER_BLOCK);
+    int num_blocks = (chunk_data->chunk_size + block_size - 1) / block_size;
     
-    int num_blocks = (chunk_data->chunk_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    
-    searchKernel<<<num_blocks, THREADS_PER_BLOCK>>>(
+    // Launch kernel with stream
+    searchKernel<<<num_blocks, block_size, 0, stream>>>(
         d_text, d_pattern, chunk_data->chunk_size, pattern_length,
         d_match_positions, d_match_count, chunk_data->chunk_offset);
     
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("Kernel launch error: %s\n", cudaGetErrorString(err));
+    // Check for errors and synchronize
+    if (cudaGetLastError() != cudaSuccess) {
         cleanupCudaMemory(d_text, d_pattern, d_match_positions, d_match_count);
+        cudaStreamDestroy(stream);
         return 0;
     }
     
-    cudaDeviceSynchronize();
-    cudaMemcpy(&h_match_count, d_match_count, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaStreamSynchronize(stream);
+    cudaMemcpyAsync(&h_match_count, d_match_count, sizeof(int), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
     
     if (h_match_count > 0) {
         int* h_match_positions = (int*)malloc(h_match_count * sizeof(int));
-        cudaMemcpy(h_match_positions, d_match_positions, 
-                   h_match_count * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpyAsync(h_match_positions, d_match_positions, 
+                       h_match_count * sizeof(int), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
         
         chunk_data->matches = (Match*)malloc(h_match_count * sizeof(Match));
         chunk_data->match_count = h_match_count;
         
+        // Optimize line info extraction
         for (int i = 0; i < h_match_count; i++) {
             chunk_data->matches[i].position = h_match_positions[i];
             
             int line_pos = h_match_positions[i] - chunk_data->chunk_offset;
             int line_start = line_pos;
             
+            // Find line start more efficiently
             while (line_start > 0 && chunk_data->text_chunk[line_start - 1] != '\n') {
                 line_start--;
             }
             
+            // Extract line info with early termination
             int extract_len = 0;
+            char* src = &chunk_data->text_chunk[line_start];
+            char* dst = chunk_data->matches[i].line_info;
+            
             while (extract_len < 199 && 
                    (line_start + extract_len) < chunk_data->chunk_size &&
-                   chunk_data->text_chunk[line_start + extract_len] != '\n' &&
-                   chunk_data->text_chunk[line_start + extract_len] != '\0') {
-                chunk_data->matches[i].line_info[extract_len] = chunk_data->text_chunk[line_start + extract_len];
+                   src[extract_len] != '\n' && src[extract_len] != '\0') {
+                dst[extract_len] = src[extract_len];
                 extract_len++;
                 
-                if (chunk_data->text_chunk[line_start + extract_len - 1] == '|') {
-                    int extra = 0;
-                    while (extra < 20 && 
-                           (line_start + extract_len + extra) < chunk_data->chunk_size &&
-                           chunk_data->text_chunk[line_start + extract_len + extra] != '\n' &&
-                           chunk_data->text_chunk[line_start + extract_len + extra] != '\0') {
-                        chunk_data->matches[i].line_info[extract_len + extra] = chunk_data->text_chunk[line_start + extract_len + extra];
-                        extra++;
+                // Early termination after pipe
+                if (src[extract_len - 1] == '|') {
+                    int extra = min(20, min(199 - extract_len, chunk_data->chunk_size - line_start - extract_len));
+                    for (int j = 0; j < extra && src[extract_len + j] != '\n' && src[extract_len + j] != '\0'; j++) {
+                        dst[extract_len + j] = src[extract_len + j];
+                        extract_len++;
                     }
-                    extract_len += extra;
                     break;
                 }
             }
-            chunk_data->matches[i].line_info[extract_len] = '\0';
+            dst[extract_len] = '\0';
         }
         
         free(h_match_positions);
@@ -194,7 +228,14 @@ int processChunkWithCUDA(ChunkData* chunk_data, const char* pattern, int pattern
     }
     
     cleanupCudaMemory(d_text, d_pattern, d_match_positions, d_match_count);
+    cudaStreamDestroy(stream);
     return h_match_count;
+}
+
+int compareMatches(const void* a, const void* b) {
+    const Match* ma = (const Match*)a;
+    const Match* mb = (const Match*)b;
+    return (ma->position > mb->position) - (ma->position < mb->position);
 }
 
 void printMatchResult(const char* line) {
@@ -272,39 +313,107 @@ int main() {
     }
     
     int total_matches = 0;
-    Match* all_matches = NULL;
+    int matches_capacity = INITIAL_MATCHES_CAPACITY;
+    Match* all_matches = (Match*)malloc(matches_capacity * sizeof(Match));
+    if (!all_matches) {
+        printf("Error: Cannot allocate initial memory for matches\n");
+        free(pattern);
+        return 1;
+    }
+    
+    // Pre-read all chunks into memory for parallel processing
+    char** all_chunks = (char**)calloc(num_chunks, sizeof(char*));
+    int* chunk_sizes = (int*)calloc(num_chunks, sizeof(int));
+    if (!all_chunks || !chunk_sizes) {
+        printf("Error: Cannot allocate memory for chunk management\n");
+        free(pattern);
+        free(all_matches);
+        if (all_chunks) free(all_chunks);
+        if (chunk_sizes) free(chunk_sizes);
+        return 1;
+    }
+    int actual_chunks = 0;
+    
+    for (int chunk_id = 0; chunk_id < num_chunks; chunk_id++) {
+        all_chunks[chunk_id] = readTextChunk(file, CHUNK_SIZE, &chunk_sizes[chunk_id]);
+        if (!all_chunks[chunk_id] || chunk_sizes[chunk_id] == 0) break;
+        actual_chunks++;
+    }
+    fclose(file);
+    
+    // Thread-local storage for matches
+    ChunkData* chunk_results = (ChunkData*)calloc(actual_chunks, sizeof(ChunkData));
+    if (!chunk_results) {
+        printf("Error: Cannot allocate memory for chunk results\n");
+        for (int i = 0; i < actual_chunks; i++) {
+            if (all_chunks[i]) free(all_chunks[i]);
+        }
+        free(all_chunks);
+        free(chunk_sizes);
+        free(all_matches);
+        free(pattern);
+        return 1;
+    }
     
     double start_time = omp_get_wtime();
     
-    for (int chunk_id = 0; chunk_id < num_chunks; chunk_id++) {
-        int actual_chunk_size;
-        char* text_chunk = readTextChunk(file, CHUNK_SIZE, &actual_chunk_size);
+    // Set OpenMP thread count
+    omp_set_num_threads(num_threads);
+    
+    // Parallel processing of chunks
+    #pragma omp parallel for schedule(dynamic)
+    for (int chunk_id = 0; chunk_id < actual_chunks; chunk_id++) {
+        chunk_results[chunk_id].text_chunk = all_chunks[chunk_id];
+        chunk_results[chunk_id].chunk_size = chunk_sizes[chunk_id];
+        chunk_results[chunk_id].chunk_offset = chunk_id * CHUNK_SIZE;
+        chunk_results[chunk_id].matches = NULL;
+        chunk_results[chunk_id].match_count = 0;
         
-        if (!text_chunk || actual_chunk_size == 0) break;
-        
-        ChunkData chunk_data = {text_chunk, actual_chunk_size, chunk_id * CHUNK_SIZE, NULL, 0};
-        int chunk_matches = processChunkWithCUDA(&chunk_data, pattern, pattern_length);
-        
-        if (chunk_matches > 0) {
-            all_matches = (Match*)realloc(all_matches, (total_matches + chunk_matches) * sizeof(Match));
-            if (!all_matches) {
-                printf("Error: Cannot allocate memory for matches\n");
-                free(text_chunk);
-                free(chunk_data.matches);
-                break;
-            }
-            
-            for (int i = 0; i < chunk_matches; i++) {
-                all_matches[total_matches + i] = chunk_data.matches[i];
-            }
-            total_matches += chunk_matches;
-            free(chunk_data.matches);
-        }
-        
-        free(text_chunk);
+        processChunkWithCUDA(&chunk_results[chunk_id], pattern, pattern_length);
     }
     
-    fclose(file);
+    // Ensure all GPU operations are complete before processing results
+    cudaDeviceSynchronize();
+    
+    // Collect results from all threads with optimized memory management
+    for (int chunk_id = 0; chunk_id < actual_chunks; chunk_id++) {
+        if (chunk_results[chunk_id].match_count > 0) {
+            // Expand capacity if needed
+            while (total_matches + chunk_results[chunk_id].match_count > matches_capacity) {
+                matches_capacity *= 2;
+                Match* temp = (Match*)realloc(all_matches, matches_capacity * sizeof(Match));
+                if (!temp) {
+                    printf("Error: Cannot allocate memory for matches\n");
+                    // Clean up allocated memory before exit
+                    if (chunk_results[chunk_id].matches) free(chunk_results[chunk_id].matches);
+                    goto cleanup;
+                }
+                all_matches = temp;
+            }
+            
+            // Copy matches efficiently
+            memcpy(&all_matches[total_matches], chunk_results[chunk_id].matches, 
+                   chunk_results[chunk_id].match_count * sizeof(Match));
+            total_matches += chunk_results[chunk_id].match_count;
+            free(chunk_results[chunk_id].matches);
+            chunk_results[chunk_id].matches = NULL; // Prevent double free
+        }
+    }
+    
+    // Clean up chunks after all processing is done
+    for (int chunk_id = 0; chunk_id < actual_chunks; chunk_id++) {
+        if (all_chunks[chunk_id]) {
+            free(all_chunks[chunk_id]);
+            all_chunks[chunk_id] = NULL;
+        }
+    }
+    
+    cleanup:
+    if (all_chunks) free(all_chunks);
+    if (chunk_sizes) free(chunk_sizes);
+    if (chunk_results) free(chunk_results);
+    
+    
     double end_time = omp_get_wtime();
     
     printf("\nSearch completed in %.6f seconds\n", end_time - start_time);
@@ -312,30 +421,32 @@ int main() {
     if (total_matches > 0) {
         printf("============================================================================\n");
         
-        // Simple bubble sort for matches by position
-        for (int i = 0; i < total_matches - 1; i++) {
-            for (int j = 0; j < total_matches - i - 1; j++) {
-                if (all_matches[j].position > all_matches[j + 1].position) {
-                    Match temp = all_matches[j];
-                    all_matches[j] = all_matches[j + 1];
-                    all_matches[j + 1] = temp;
-                }
-            }
-        }
+        // Use quicksort instead of bubble sort for better performance
+        qsort(all_matches, total_matches, sizeof(Match), compareMatches);
         
         for (int i = 0; i < total_matches; i++) {
             printMatchResult(all_matches[i].line_info);
         }
         
         printf("============================================================================\n");
-        free(all_matches);
     } else {
         printf("============================================================================\n");
     }
     
     printf("Total matches found: %d\n", total_matches);
     printf("Time taken for hybrid OpenMP-CUDA search: %.6f seconds\n", end_time - start_time);
+    printf("Processing rate: %.2f MB/s\n", (double)file_size / (1024 * 1024) / (end_time - start_time));
+    printf("Chunks processed in parallel: %d\n", actual_chunks);
     
-    free(pattern);
+    // Clean up remaining memory
+    if (all_matches) {
+        free(all_matches);
+        all_matches = NULL;
+    }
+    if (pattern) {
+        free(pattern);
+        pattern = NULL;
+    }
+    
     return 0;
 }

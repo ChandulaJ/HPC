@@ -57,7 +57,7 @@ function executeCommand(command, args, options = {}) {
             const executionTime = ((endTime - startTime) / 1000).toFixed(3);
             
             console.log(`Process exited with code: ${code}`);
-            console.log(`Execution time: ${executionTime}s`);
+            console.log(`Total server time (including overhead): ${executionTime}s`);
             
             if (code === 0) {
                 resolve({
@@ -114,7 +114,9 @@ function parseResults(output) {
     const results = {
         totalMatches: 0,
         executionTime: 0,
-        details: []
+        details: [],
+        processingRate: null,
+        chunksProcessed: null
     };
 
     // Extract total matches
@@ -124,10 +126,11 @@ function parseResults(output) {
         results.totalMatches = parseInt(matchMatch[1]);
     }
 
-    // Extract execution time
+    // Extract execution time (prioritize program-specific timing)
     const timeRegexes = [
-        /Time taken for (?:serial|openmp|cuda) (?:parallel\s*)?search:\s*([\d.]+)\s*seconds/i,
-        /Time taken for (?:serial|openmp|cuda).*?:\s*([\d.]+)\s*seconds/i,
+        /Time taken for (?:hybrid OpenMP-CUDA) search:\s*([\d.]+)\s*seconds/i,
+        /Time taken for (?:serial|openmp|cuda|hybrid) (?:parallel\s*)?(?:OpenMP-CUDA\s*)?search:\s*([\d.]+)\s*seconds/i,
+        /Time taken for (?:serial|openmp|cuda|hybrid).*?:\s*([\d.]+)\s*seconds/i,
         /Execution time:\s*([\d.]+)\s*seconds/i
     ];
     
@@ -137,6 +140,18 @@ function parseResults(output) {
             results.executionTime = parseFloat(timeMatch[1]);
             break;
         }
+    }
+
+    // Extract processing rate (hybrid-specific)
+    const rateMatch = output.match(/Processing rate:\s*([\d.]+)\s*MB\/s/i);
+    if (rateMatch) {
+        results.processingRate = parseFloat(rateMatch[1]);
+    }
+
+    // Extract chunks processed (hybrid-specific)
+    const chunksMatch = output.match(/Chunks processed in parallel:\s*(\d+)/i);
+    if (chunksMatch) {
+        results.chunksProcessed = parseInt(chunksMatch[1]);
     }
 
     // Extract pattern matches
@@ -378,13 +393,21 @@ app.post('/api/hybrid', async (req, res) => {
 
         console.log(`Starting hybrid search for pattern: ${pattern} with ${threads} threads`);
 
-        // Check if executable exists, compile if needed
+        // Check if executable exists
         const executablePath = path.join(HYBRID_PATH, 'hybridSearch');
         if (!fs.existsSync(executablePath)) {
-            console.log('Compiling hybrid search program...');
-            await executeCommand('make', [], {
-                cwd: HYBRID_PATH
-            });
+            console.log('Hybrid search executable not found, compiling...');
+            try {
+                await executeCommand('nvcc', ['-o', 'hybridSearch', 'hybridSearch.cu', '-Xcompiler', '-fopenmp', '-Wno-deprecated-gpu-targets'], {
+                    cwd: HYBRID_PATH
+                });
+            } catch (compileError) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Failed to compile hybrid search program',
+                    details: compileError.error || compileError.message
+                });
+            }
         }
 
         // Run hybrid search
@@ -401,10 +424,13 @@ app.post('/api/hybrid', async (req, res) => {
             success: true,
             message: `Hybrid search completed successfully with ${threads} threads`,
             output: result.output,
-            executionTime: parsedResults.executionTime || result.executionTime,
+            executionTime: parsedResults.executionTime || result.executionTime, // Program time (more accurate)
+            serverExecutionTime: result.executionTime, // Total server time (includes overhead)
             totalMatches: parsedResults.totalMatches,
             matchDetails: parsedResults.details,
-            threads: threads
+            threads: threads,
+            processingRate: parsedResults.processingRate,
+            chunksProcessed: parsedResults.chunksProcessed
         });
 
     } catch (error) {
