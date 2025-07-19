@@ -5,8 +5,22 @@
 #define MAX_LINE 1024
 
 int main() {
-    char inputFileLocation[200] = "/home/cj/HPC_data/Human_genome.fna";
-    char outputFileLocation[200] = "/home/cj/HPC_data/Human_genome_preprocessed.fna";
+    char inputFileLocation[200];
+    char outputFileLocation[200];
+
+    printf("Enter input file location: ");
+    scanf("%s", inputFileLocation);
+    
+    printf("Enter output file location: ");
+    scanf("%s", outputFileLocation);
+
+    if(inputFileLocation[0] == '\0') {
+        strcpy(inputFileLocation, "/home/cj/HPC_data/Human_genome.fna");
+
+    }
+    if(outputFileLocation[0] == '\0') {
+        strcpy(outputFileLocation, "/home/cj/HPC_data/Human_genome_preprocessed.fna");
+    }
 
     FILE *infile = fopen(inputFileLocation, "r");
     FILE *outfile = fopen(outputFileLocation, "w");
