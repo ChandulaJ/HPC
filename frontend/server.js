@@ -18,6 +18,7 @@ const PREPROCESSING_PATH = path.join(PROJECT_ROOT, 'Preprocessing');
 const SERIAL_PATH = path.join(PROJECT_ROOT, 'Serial');
 const OPENMP_PATH = path.join(PROJECT_ROOT, 'OpenMp');
 const CUDA_PATH = path.join(PROJECT_ROOT, 'CUDA');
+const HYBRID_PATH = path.join(PROJECT_ROOT, 'Hybrid');
 
 // Utility function to execute commands with timeout and better error handling
 function executeCommand(command, args, options = {}) {
@@ -56,7 +57,7 @@ function executeCommand(command, args, options = {}) {
             const executionTime = ((endTime - startTime) / 1000).toFixed(3);
             
             console.log(`Process exited with code: ${code}`);
-            console.log(`Execution time: ${executionTime}s`);
+            console.log(`Total server time (including overhead): ${executionTime}s`);
             
             if (code === 0) {
                 resolve({
@@ -113,7 +114,9 @@ function parseResults(output) {
     const results = {
         totalMatches: 0,
         executionTime: 0,
-        details: []
+        details: [],
+        processingRate: null,
+        chunksProcessed: null
     };
 
     // Extract total matches
@@ -123,10 +126,11 @@ function parseResults(output) {
         results.totalMatches = parseInt(matchMatch[1]);
     }
 
-    // Extract execution time
+    // Extract execution time (prioritize program-specific timing)
     const timeRegexes = [
-        /Time taken for (?:serial|openmp|cuda) (?:parallel\s*)?search:\s*([\d.]+)\s*seconds/i,
-        /Time taken for (?:serial|openmp|cuda).*?:\s*([\d.]+)\s*seconds/i,
+        /Time taken for (?:hybrid OpenMP-CUDA) search:\s*([\d.]+)\s*seconds/i,
+        /Time taken for (?:serial|openmp|cuda|hybrid) (?:parallel\s*)?(?:OpenMP-CUDA\s*)?search:\s*([\d.]+)\s*seconds/i,
+        /Time taken for (?:serial|openmp|cuda|hybrid).*?:\s*([\d.]+)\s*seconds/i,
         /Execution time:\s*([\d.]+)\s*seconds/i
     ];
     
@@ -136,6 +140,18 @@ function parseResults(output) {
             results.executionTime = parseFloat(timeMatch[1]);
             break;
         }
+    }
+
+    // Extract processing rate (hybrid-specific)
+    const rateMatch = output.match(/Processing rate:\s*([\d.]+)\s*MB\/s/i);
+    if (rateMatch) {
+        results.processingRate = parseFloat(rateMatch[1]);
+    }
+
+    // Extract chunks processed (hybrid-specific)
+    const chunksMatch = output.match(/Chunks processed in parallel:\s*(\d+)/i);
+    if (chunksMatch) {
+        results.chunksProcessed = parseInt(chunksMatch[1]);
     }
 
     // Extract pattern matches
@@ -156,7 +172,25 @@ function parseResults(output) {
 // Preprocessing endpoint
 app.post('/api/preprocessing', async (req, res) => {
     try {
-        console.log('Starting preprocessing...');
+        const { inputFilePath, outputFilePath } = req.body;
+        
+        if (!inputFilePath) {
+            return res.status(400).json({
+                success: false,
+                error: 'Input file path is required'
+            });
+        }
+
+        if (!outputFilePath) {
+            return res.status(400).json({
+                success: false,
+                error: 'Output file path is required'
+            });
+        }
+
+        console.log(`Starting preprocessing...`);
+        console.log(`Input file: ${inputFilePath}`);
+        console.log(`Output file: ${outputFilePath}`);
         
         // Check if executable exists, compile if needed
         const executablePath = path.join(PREPROCESSING_PATH, 'addLineNumbers');
@@ -167,9 +201,10 @@ app.post('/api/preprocessing', async (req, res) => {
             });
         }
 
-        // Run preprocessing
+        // Run preprocessing with input and output file paths
         const result = await executeCommand('./addLineNumbers', [], {
             cwd: PREPROCESSING_PATH,
+            input: `${inputFilePath}\n${outputFilePath}\n`,
             timeout: 600000 // 10 minutes for large files
         });
 
@@ -177,7 +212,9 @@ app.post('/api/preprocessing', async (req, res) => {
             success: true,
             message: 'Preprocessing completed successfully',
             output: result.output,
-            executionTime: result.executionTime
+            executionTime: result.executionTime,
+            inputFilePath: inputFilePath,
+            outputFilePath: outputFilePath
         });
 
     } catch (error) {
@@ -350,6 +387,78 @@ app.post('/api/cuda', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'CUDA search failed',
+            details: error.error || error.message,
+            output: error.output || ''
+        });
+    }
+});
+
+// Hybrid search endpoint
+app.post('/api/hybrid', async (req, res) => {
+    try {
+        const { pattern, threads } = req.body;
+        
+        if (!pattern) {
+            return res.status(400).json({
+                success: false,
+                error: 'Pattern is required'
+            });
+        }
+
+        if (!threads || threads < 1) {
+            return res.status(400).json({
+                success: false,
+                error: 'Valid thread count is required'
+            });
+        }
+
+        console.log(`Starting hybrid search for pattern: ${pattern} with ${threads} threads`);
+
+        // Check if executable exists
+        const executablePath = path.join(HYBRID_PATH, 'hybridSearch');
+        if (!fs.existsSync(executablePath)) {
+            console.log('Hybrid search executable not found, compiling...');
+            try {
+                await executeCommand('nvcc', ['-o', 'hybridSearch', 'hybridSearch.cu', '-Xcompiler', '-fopenmp', '-Wno-deprecated-gpu-targets'], {
+                    cwd: HYBRID_PATH
+                });
+            } catch (compileError) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Failed to compile hybrid search program',
+                    details: compileError.error || compileError.message
+                });
+            }
+        }
+
+        // Run hybrid search
+        const result = await executeCommand('./hybridSearch', [], {
+            cwd: HYBRID_PATH,
+            input: `${pattern}\n${threads}\n`,
+            timeout: 600000, // 10 minutes
+            env: { ...process.env, OMP_NUM_THREADS: threads.toString() }
+        });
+
+        const parsedResults = parseResults(result.output);
+
+        res.json({
+            success: true,
+            message: `Hybrid search completed successfully with ${threads} threads`,
+            output: result.output,
+            executionTime: parsedResults.executionTime || result.executionTime, // Program time (more accurate)
+            serverExecutionTime: result.executionTime, // Total server time (includes overhead)
+            totalMatches: parsedResults.totalMatches,
+            matchDetails: parsedResults.details,
+            threads: threads,
+            processingRate: parsedResults.processingRate,
+            chunksProcessed: parsedResults.chunksProcessed
+        });
+
+    } catch (error) {
+        console.error('Hybrid search error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Hybrid search failed',
             details: error.error || error.message,
             output: error.output || ''
         });
